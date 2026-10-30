@@ -7,6 +7,7 @@ import * as D from '../controllers/feed.controller';
 import * as E from '../controllers/egg.controller';
 import * as I from '../controllers/invoice.controller';
 import { dashboard } from '../controllers/dashboard.controller';
+import { health } from '../controllers/health.controller';
 
 const r = Router();
 
@@ -14,6 +15,7 @@ const r = Router();
 r.post('/auth/register', uploadAvatar, A.register);
 r.post('/auth/login', A.login);
 r.get('/public/invoices/:token/pdf', I.publicPdf);
+r.get('/health', health);
 
 // ---- everything below requires a valid JWT; req.ownerId is the tenant ----
 r.use(auth);
