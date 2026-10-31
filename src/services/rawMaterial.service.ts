@@ -8,6 +8,8 @@ const lockOwner = (client: PoolClient, ownerId: number) =>
 export async function listMaterials(ownerId: number) {
   return query(
     `SELECT m.id, m.name, m.unit, m.min_alert_threshold,
+            COALESCE(SUM(t.quantity) FILTER (WHERE t.transaction_type='INWARD'),0) AS total_purchased,
+            COALESCE(SUM(t.quantity) FILTER (WHERE t.transaction_type='OUTWARD_PROCESSING'),0) AS total_consumed,
             COALESCE(SUM(CASE WHEN t.transaction_type='INWARD' THEN t.quantity ELSE -t.quantity END),0) AS current_stock
      FROM raw_materials m
      LEFT JOIN raw_material_logs t ON t.material_id=m.id AND t.owner_id=m.owner_id
@@ -19,12 +21,37 @@ export async function listMaterials(ownerId: number) {
 }
 
 export async function createMaterial(ownerId: number, d: any) {
-  const rows = await query(
-    `INSERT INTO raw_materials(owner_id,name,unit,min_alert_threshold)
-     VALUES($1,$2,$3,$4) RETURNING id,name,unit,min_alert_threshold`,
-    [ownerId, d.name, d.unit, d.min_alert_threshold]
-  );
-  return { ...rows[0], current_stock: 0 };
+  return withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    const existing = await client.query(
+      'SELECT id,unit FROM raw_materials WHERE owner_id=$1 AND lower(trim(name))=lower(trim($2)) FOR UPDATE',
+      [ownerId, d.name]
+    );
+    const duplicate = existing.rows.length > 0;
+    if (existing.rows.length && existing.rows[0].unit !== d.unit) {
+      throw new HttpError(400, 'A raw material with this name already exists with a different unit');
+    }
+    if (!existing.rows.length) {
+      const inserted = await client.query(
+        `INSERT INTO raw_materials(owner_id,name,unit,min_alert_threshold)
+         VALUES($1,$2,$3,$4) RETURNING id`,
+        [ownerId, d.name, d.unit, d.min_alert_threshold]
+      );
+      existing.rows.push(inserted.rows[0]);
+    }
+    const summary = await client.query(
+      `SELECT m.id,m.name,m.unit,m.min_alert_threshold,
+              COALESCE(SUM(t.quantity) FILTER (WHERE t.transaction_type='INWARD'),0) AS total_purchased,
+              COALESCE(SUM(t.quantity) FILTER (WHERE t.transaction_type='OUTWARD_PROCESSING'),0) AS total_consumed,
+              COALESCE(SUM(CASE WHEN t.transaction_type='INWARD' THEN t.quantity ELSE -t.quantity END),0) AS current_stock
+       FROM raw_materials m
+       LEFT JOIN raw_material_logs t ON t.owner_id=m.owner_id AND t.material_id=m.id
+       WHERE m.owner_id=$1 AND m.id=$2
+       GROUP BY m.id`,
+      [ownerId, existing.rows[0].id]
+    );
+    return { ...summary.rows[0], duplicate };
+  });
 }
 
 export async function updateMaterial(ownerId: number, id: number, d: any) {

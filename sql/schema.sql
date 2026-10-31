@@ -85,9 +85,6 @@ CREATE TABLE IF NOT EXISTS raw_materials (
   UNIQUE (owner_id, id)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_owner_name_ci
-  ON raw_materials(owner_id, lower(trim(name)));
-
 DO $$ BEGIN
   IF to_regclass('public.raw_material_transactions') IS NOT NULL
      AND to_regclass('public.raw_material_logs') IS NULL THEN
@@ -134,6 +131,34 @@ ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_image_url TEXT;
 ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_number VARCHAR(100);
 ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(150);
 
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM raw_materials
+    GROUP BY owner_id, lower(trim(name))
+    HAVING COUNT(*) > 1 AND COUNT(DISTINCT unit) > 1
+  ) THEN
+    RAISE EXCEPTION 'Cannot merge duplicate raw materials with different units; resolve those records before migrating';
+  END IF;
+  WITH ranked AS (
+    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    FROM raw_materials
+  )
+  UPDATE raw_material_logs l
+  SET material_id = ranked.keep_id
+  FROM ranked
+  WHERE l.material_id = ranked.id AND ranked.id <> ranked.keep_id;
+  WITH ranked AS (
+    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    FROM raw_materials
+  )
+  DELETE FROM raw_materials m
+  USING ranked
+  WHERE m.id = ranked.id AND ranked.id <> ranked.keep_id;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_owner_name_ci
+  ON raw_materials(owner_id, lower(trim(name)));
+
 CREATE TABLE IF NOT EXISTS medicines (
   id BIGSERIAL PRIMARY KEY,
   owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -144,9 +169,6 @@ CREATE TABLE IF NOT EXISTS medicines (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (owner_id, id)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_owner_name_ci
-  ON medicines(owner_id, lower(trim(name)));
 
 CREATE TABLE IF NOT EXISTS medicine_batches (
   id BIGSERIAL PRIMARY KEY,
@@ -227,6 +249,50 @@ INSERT INTO medicine_logs
 SELECT u.owner_id,u.medicine_id,'USED',u.quantity,u.unit,u.flock_id,u.admin_route,u.usage_date,u.remarks,u.id,u.created_at
 FROM medicine_usage u
 ON CONFLICT DO NOTHING;
+
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM medicines
+    GROUP BY owner_id, lower(trim(name))
+    HAVING COUNT(*) > 1 AND (COUNT(DISTINCT unit) > 1 OR COUNT(DISTINCT category) > 1)
+  ) THEN
+    RAISE EXCEPTION 'Cannot merge duplicate medicines with different categories or units; resolve those records before migrating';
+  END IF;
+  WITH ranked AS (
+    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    FROM medicines
+  )
+  UPDATE medicine_batches b
+  SET medicine_id = ranked.keep_id
+  FROM ranked
+  WHERE b.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
+  WITH ranked AS (
+    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    FROM medicines
+  )
+  UPDATE medicine_usage u
+  SET medicine_id = ranked.keep_id
+  FROM ranked
+  WHERE u.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
+  WITH ranked AS (
+    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    FROM medicines
+  )
+  UPDATE medicine_logs l
+  SET medicine_id = ranked.keep_id
+  FROM ranked
+  WHERE l.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
+  WITH ranked AS (
+    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    FROM medicines
+  )
+  DELETE FROM medicines m
+  USING ranked
+  WHERE m.id = ranked.id AND ranked.id <> ranked.keep_id;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_owner_name_ci
+  ON medicines(owner_id, lower(trim(name)));
 
 CREATE TABLE IF NOT EXISTS feed_usage (
   id BIGSERIAL PRIMARY KEY,

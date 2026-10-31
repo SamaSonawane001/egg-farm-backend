@@ -16,6 +16,9 @@ export async function listMedicines(ownerId: number) {
        GROUP BY b.id,b.owner_id,b.medicine_id,b.expiry_date,b.received_quantity
      )
      SELECT m.id,m.name,m.category,m.unit,m.min_alert_level,
+            COALESCE(SUM(s.received_quantity),0) AS total_purchased,
+            COALESCE((SELECT SUM(u.quantity) FROM medicine_usage u
+                      WHERE u.owner_id=m.owner_id AND u.medicine_id=m.id),0) AS total_consumed,
             COALESCE(SUM(s.remaining),0) AS current_stock,
             COALESCE(SUM(s.remaining) FILTER (WHERE s.expiry_date >= CURRENT_DATE),0) AS available_stock,
             MIN(s.expiry_date) FILTER (WHERE s.remaining > 0) AS nearest_expiry,
@@ -33,12 +36,53 @@ export async function listMedicines(ownerId: number) {
 }
 
 export async function createMedicine(ownerId: number, d: any) {
-  const rows = await query(
-    `INSERT INTO medicines(owner_id,name,category,unit,min_alert_level)
-     VALUES($1,$2,$3,$4,$5) RETURNING id,name,category,unit,min_alert_level`,
-    [ownerId, d.name, d.category, d.unit, d.min_alert_level]
-  );
-  return { ...rows[0], current_stock: 0, available_stock: 0, nearest_expiry: null, expiry: null };
+  return withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    const existing = await client.query(
+      'SELECT id,category,unit FROM medicines WHERE owner_id=$1 AND lower(trim(name))=lower(trim($2)) FOR UPDATE',
+      [ownerId, d.name]
+    );
+    const duplicate = existing.rows.length > 0;
+    if (duplicate && (existing.rows[0].category !== d.category || existing.rows[0].unit !== d.unit)) {
+      throw new HttpError(400, 'A medicine with this name already exists with a different category or unit');
+    }
+    if (!duplicate) {
+      const inserted = await client.query(
+        `INSERT INTO medicines(owner_id,name,category,unit,min_alert_level)
+         VALUES($1,$2,$3,$4,$5) RETURNING id`,
+        [ownerId, d.name, d.category, d.unit, d.min_alert_level]
+      );
+      existing.rows.push(inserted.rows[0]);
+    }
+    const result = await client.query(
+      `WITH batch_stock AS (
+         SELECT b.id,b.owner_id,b.medicine_id,b.expiry_date,b.received_quantity,
+                b.received_quantity-COALESCE(SUM(a.quantity),0) AS remaining,
+                b.batch_number
+         FROM medicine_batches b
+         LEFT JOIN medicine_usage_allocations a ON a.batch_id=b.id AND a.owner_id=b.owner_id
+         WHERE b.owner_id=$1
+         GROUP BY b.id,b.owner_id,b.medicine_id,b.expiry_date,b.received_quantity,b.batch_number
+       )
+       SELECT m.id,m.name,m.category,m.unit,m.min_alert_level,
+              COALESCE(SUM(s.received_quantity),0) AS total_purchased,
+              COALESCE((SELECT SUM(u.quantity) FROM medicine_usage u
+                        WHERE u.owner_id=m.owner_id AND u.medicine_id=m.id),0) AS total_consumed,
+              COALESCE(SUM(s.remaining),0) AS current_stock,
+              COALESCE(SUM(s.remaining) FILTER (WHERE s.expiry_date >= CURRENT_DATE),0) AS available_stock,
+              MIN(s.expiry_date) FILTER (WHERE s.remaining > 0) AS nearest_expiry,
+              MIN(s.expiry_date) FILTER (WHERE s.remaining > 0) AS expiry,
+              (SELECT string_agg(DISTINCT b.batch_number, ' ')
+               FROM medicine_batches b
+               WHERE b.owner_id=m.owner_id AND b.medicine_id=m.id) AS batch_numbers
+       FROM medicines m
+       LEFT JOIN batch_stock s ON s.medicine_id=m.id AND s.owner_id=m.owner_id
+       WHERE m.owner_id=$1 AND m.id=$2
+       GROUP BY m.id,m.name,m.category,m.unit,m.min_alert_level`,
+      [ownerId, existing.rows[0].id]
+    );
+    return { ...result.rows[0], duplicate };
+  });
 }
 
 export async function updateMedicine(ownerId: number, id: number, d: any) {

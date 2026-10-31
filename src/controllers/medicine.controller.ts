@@ -59,7 +59,10 @@ function getDateFilters(req: any) {
 }
 
 export const list = asyncHandler(async (req, res) => ok(res, await svc.listMedicines(req.ownerId)));
-export const create = asyncHandler(async (req, res) => ok(res, await svc.createMedicine(req.ownerId, medicineBody.parse(req.body)), 201));
+export const create = asyncHandler(async (req, res) => {
+  const result = await svc.createMedicine(req.ownerId, medicineBody.parse(req.body));
+  ok(res, result, result.duplicate ? 200 : 201);
+});
 export const update = asyncHandler(async (req, res) =>
   ok(res, await svc.updateMedicine(req.ownerId, idParam(req.params.id), medicineBody.parse(req.body))));
 export const remove = asyncHandler(async (req, res) => {

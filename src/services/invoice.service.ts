@@ -47,11 +47,11 @@ export async function create(ownerId: number, d: any) {
     let eggQuantity = null;
     let amount: number;
     if (d.invoice_type === 'egg_sale') {
-      if (!['eggs', 'crate', 'tray'].includes(it.egg_unit)) {
+      if (!['eggs', 'tray'].includes(it.egg_unit)) {
         throw new HttpError(400, 'Each egg-sale item must include a valid egg billing unit');
       }
       if (!Number.isSafeInteger(Number(it.quantity)) || Number(it.quantity) <= 0) {
-        throw new HttpError(400, 'Egg and crate quantities must be whole numbers');
+        throw new HttpError(400, 'Egg and tray quantities must be whole numbers');
       }
       const eggsPerUnit = it.egg_unit === 'eggs' ? 1 : 30;
       const expectedEggQuantity = Number(it.quantity) * eggsPerUnit;

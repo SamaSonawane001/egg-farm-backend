@@ -8,6 +8,7 @@ import * as E from '../controllers/egg.controller';
 import * as I from '../controllers/invoice.controller';
 import * as RM from '../controllers/rawMaterial.controller';
 import * as M from '../controllers/medicine.controller';
+import * as X from '../controllers/expense.controller';
 import { dashboard } from '../controllers/dashboard.controller';
 import { health } from '../controllers/health.controller';
 import * as U from '../controllers/upload.controller';
@@ -26,6 +27,7 @@ r.get('/auth/me', A.me);
 r.put('/profile', uploadAvatar, A.updateProfile);
 r.post('/profile/password', A.changePassword);
 r.get('/dashboard', dashboard);
+r.get('/expenses/monthly-breakdown', X.monthlyBreakdownController);
 
 r.get('/flock/batches', F.listBatches);
 r.post('/flock/batches', F.createBatch);

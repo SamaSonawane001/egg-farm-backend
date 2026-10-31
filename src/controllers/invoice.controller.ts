@@ -6,7 +6,10 @@ import * as svc from '../services/invoice.service';
 const body = z.object({
   invoice_type: z.enum(['egg_sale', 'spent_hen_sale', 'feed_trade']),
   customer_name: z.string().trim().min(1).max(160),
-  customer_mobile: optText,
+  customer_mobile: z.string().regex(
+    /^[6-9]\d{9}$/,
+    'Please enter a valid 10-digit mobile number'
+  ),
   invoice_date: dateStr,
   tax_percent: z.coerce.number().min(0).max(100).default(0),
   notes: optText,
@@ -16,7 +19,7 @@ const body = z.object({
         description: z.string().trim().min(1).max(255),
         quantity: z.coerce.number().positive(),
         unit_price: z.coerce.number().min(0).refine((n) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-8, 'Use at most 2 decimal places'),
-        egg_unit: z.enum(['eggs', 'crate', 'tray']).nullable().optional(),
+        egg_unit: z.enum(['eggs', 'tray']).nullable().optional(),
         egg_quantity: z.coerce.number().int().positive().nullable().optional(),
       })
     )

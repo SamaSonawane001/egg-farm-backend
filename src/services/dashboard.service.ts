@@ -20,7 +20,9 @@ export async function getDashboard(ownerId: number, today: string) {
        SELECT
          COALESCE((SELECT SUM(grand_total) FROM invoices, m WHERE owner_id=$1 AND invoice_date >= m.s AND invoice_date < m.e),0) AS month_revenue,
          COALESCE((SELECT SUM(total_cost) FROM flock_batches, m WHERE owner_id=$1 AND arrival_date >= m.s AND arrival_date < m.e),0)
-       + COALESCE((SELECT SUM(total_cost) FROM feed_purchases, m WHERE owner_id=$1 AND delivery_date >= m.s AND delivery_date < m.e),0) AS month_expense`,
+       + COALESCE((SELECT SUM(total_cost) FROM feed_purchases, m WHERE owner_id=$1 AND delivery_date >= m.s AND delivery_date < m.e),0)
+       + COALESCE((SELECT SUM(total_amount) FROM raw_material_logs, m WHERE owner_id=$1 AND transaction_type='INWARD' AND transaction_date >= m.s AND transaction_date < m.e),0)
+       + COALESCE((SELECT SUM(total_cost) FROM medicine_batches, m WHERE owner_id=$1 AND received_date >= m.s AND received_date < m.e),0) AS month_expense`,
       [ownerId, today]
     ),
     query(
