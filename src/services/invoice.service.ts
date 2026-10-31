@@ -5,7 +5,13 @@ import { buildInvoicePdf } from './pdf.service';
 
 export const list = (ownerId: number) =>
   query(
-    `SELECT i.*, (SELECT COUNT(*) FROM invoice_items it WHERE it.invoice_id=i.id) AS items_count
+    `SELECT i.*,
+            (SELECT COUNT(*) FROM invoice_items it WHERE it.invoice_id=i.id) AS items_count,
+            COALESCE((SELECT json_agg(json_build_object(
+              'description',it.description,'quantity',it.quantity,'unit_price',it.unit_price,
+              'amount',it.amount,'egg_quantity',it.egg_quantity,'egg_unit',it.egg_unit
+            ) ORDER BY it.id) FROM invoice_items it
+              WHERE it.invoice_id=i.id AND it.owner_id=i.owner_id),'[]'::json) AS items
      FROM invoices i WHERE i.owner_id=$1 ORDER BY i.created_at DESC, i.id DESC`,
     [ownerId]
   );
@@ -37,7 +43,34 @@ export async function getOne(ownerId: number, id: number) {
 }
 
 export async function create(ownerId: number, d: any) {
-  const items = d.items.map((it: any) => ({ ...it, amount: round2(it.quantity * it.unit_price) }));
+  const items = d.items.map((it: any) => {
+    let eggQuantity = null;
+    let amount: number;
+    if (d.invoice_type === 'egg_sale') {
+      if (!['eggs', 'crate', 'tray'].includes(it.egg_unit)) {
+        throw new HttpError(400, 'Each egg-sale item must include a valid egg billing unit');
+      }
+      if (!Number.isSafeInteger(Number(it.quantity)) || Number(it.quantity) <= 0) {
+        throw new HttpError(400, 'Egg and crate quantities must be whole numbers');
+      }
+      const eggsPerUnit = it.egg_unit === 'eggs' ? 1 : 30;
+      const expectedEggQuantity = Number(it.quantity) * eggsPerUnit;
+      if (!Number.isSafeInteger(expectedEggQuantity) || expectedEggQuantity > 2147483647) {
+        throw new HttpError(400, 'Egg quantity is too large');
+      }
+      if (Number(it.egg_quantity) !== expectedEggQuantity) {
+        throw new HttpError(400, 'Egg quantity must match the selected billing unit');
+      }
+      eggQuantity = expectedEggQuantity;
+      amount = round2(eggQuantity * Number(it.unit_price));
+    } else {
+      if (it.egg_unit != null || it.egg_quantity != null) {
+        throw new HttpError(400, 'Egg billing fields are only valid for egg-sale invoices');
+      }
+      amount = round2(Number(it.quantity) * Number(it.unit_price));
+    }
+    return { ...it, egg_quantity: eggQuantity, amount };
+  });
   const subtotal = round2(items.reduce((s: number, it: any) => s + it.amount, 0));
   const taxAmount = round2((subtotal * d.tax_percent) / 100);
   const grand = round2(subtotal + taxAmount);
@@ -46,14 +79,14 @@ export async function create(ownerId: number, d: any) {
     await c.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
     const year = new Date().getFullYear();
     const stock = await getEggStock(ownerId, c);
-    let eggQuantity = 0;
+    let totalEggQuantity = 0;
     if (d.invoice_type === 'egg_sale') {
       for (const item of items) {
         const quantity = eggQuantityForItem(item, d.invoice_type);
         if (quantity == null) throw new HttpError(400, 'Each egg-sale item must include its egg quantity');
-        eggQuantity += quantity;
+        totalEggQuantity += quantity;
       }
-      if (eggQuantity > stock.available_eggs) {
+      if (totalEggQuantity > stock.available_eggs) {
         throw new HttpError(400, `Cannot bill more than available stock (Max available: ${stock.available_eggs})`);
       }
     }
@@ -69,8 +102,9 @@ export async function create(ownerId: number, d: any) {
     const invId = Number(ins.rows[0].id);
     for (const it of items) {
       await c.query(
-        'INSERT INTO invoice_items (owner_id,invoice_id,description,quantity,unit_price,amount,egg_quantity) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-        [ownerId, invId, it.description, it.quantity, it.unit_price, it.amount, eggQuantityForItem(it, d.invoice_type)]
+        'INSERT INTO invoice_items (owner_id,invoice_id,description,quantity,unit_price,amount,egg_quantity,egg_unit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        [ownerId, invId, it.description, it.quantity, it.unit_price, it.amount,
+          eggQuantityForItem(it, d.invoice_type), d.invoice_type === 'egg_sale' ? it.egg_unit : null]
       );
     }
     return invId;

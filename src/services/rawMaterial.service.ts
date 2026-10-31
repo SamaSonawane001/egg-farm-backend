@@ -68,10 +68,23 @@ export async function listLogs(ownerId: number, from?: string, to?: string) {
 export async function receiveMaterial(ownerId: number, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
-    const material = await client.query(
-      'SELECT id,unit FROM raw_materials WHERE id=$1 AND owner_id=$2 FOR UPDATE',
-      [d.material_id, ownerId]
-    );
+    let material = d.material_id
+      ? await client.query(
+          'SELECT id,name,unit FROM raw_materials WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+          [d.material_id, ownerId]
+        )
+      : await client.query(
+          'SELECT id,name,unit FROM raw_materials WHERE owner_id=$1 AND lower(trim(name))=lower(trim($2)) FOR UPDATE',
+          [ownerId, d.material_name]
+        );
+    if (!d.material_id && !material.rows.length) {
+      const created = await client.query(
+        `INSERT INTO raw_materials(owner_id,name,unit)
+         VALUES($1,$2,$3) RETURNING id,name,unit`,
+        [ownerId, d.material_name.trim(), d.unit]
+      );
+      material = created;
+    }
     if (!material.rows.length) throw new HttpError(404, 'Raw material not found');
     if (material.rows[0].unit !== d.unit) throw new HttpError(400, 'Unit must match the raw material unit');
     const result = await client.query(
@@ -79,7 +92,7 @@ export async function receiveMaterial(ownerId: number, d: any) {
        (owner_id,material_id,transaction_type,quantity,unit,transaction_date,supplier,rate_per_unit,total_amount,remarks,
         bill_image_url,bill_number,vendor_name)
        VALUES($1,$2,'INWARD',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-      [ownerId, d.material_id, d.quantity, d.unit, d.date, d.supplier, d.rate_per_unit, d.total_amount, d.remarks,
+      [ownerId, material.rows[0].id, d.quantity, d.unit, d.date, d.supplier, d.rate_per_unit, d.total_amount, d.remarks,
          d.bill_image_url, d.bill_number, d.vendor_name ?? (d.supplier?.length <= 150 ? d.supplier : null)]
     );
     return result.rows[0];
@@ -106,6 +119,8 @@ export async function listProcessing(ownerId: number) {
   );
   return operations.map((p: any) => ({
     ...p,
+    produced_quantity: p.produced_quantity ?? p.quantity_bags,
+    produced_unit: p.produced_unit ?? 'bags',
     materials: materials
       .filter((m: any) => m.processing_id === p.id)
       .map((m: any) => ({ material_id: m.material_id, name: m.name, unit: m.unit, quantity: m.quantity })),
@@ -115,11 +130,34 @@ export async function listProcessing(ownerId: number) {
 export async function processMaterials(ownerId: number, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
-    const feed = await client.query(
-      'SELECT id,name FROM feed_products WHERE id=$1 AND owner_id=$2 FOR UPDATE',
-      [d.feed_product_id, ownerId]
-    );
+    const feed = d.feed_product_id
+      ? await client.query(
+          'SELECT id,name FROM feed_products WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+          [d.feed_product_id, ownerId]
+        )
+      : await client.query(
+          'SELECT id,name FROM feed_products WHERE owner_id=$1 AND lower(trim(name))=lower(trim($2)) FOR UPDATE',
+          [ownerId, d.feed_product_name]
+        );
+    if (!d.feed_product_id && !feed.rows.length) {
+      const created = await client.query(
+        'INSERT INTO feed_products(owner_id,name) VALUES($1,$2) RETURNING id,name',
+        [ownerId, d.feed_product_name.trim()]
+      );
+      feed.rows.push(created.rows[0]);
+    }
     if (!feed.rows.length) throw new HttpError(404, 'Feed product not found');
+    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50);
+    const producedUnit = d.output_unit ?? 'bags';
+    const producedQuantity = Number(d.output_quantity ?? d.quantity_bags);
+    const rawBagCount = d.output_quantity === undefined || producedUnit === 'bags'
+      ? producedQuantity
+      : producedQuantity / kgPerBag;
+    const quantityBags = Math.round(rawBagCount * 100) / 100;
+    if (!Number.isFinite(quantityBags) || quantityBags <= 0) {
+      throw new HttpError(400, 'Produced quantity is too small to add to feed inventory');
+    }
     const ids = [...new Set<number>(d.materials.map((m: any) => m.material_id))].sort((a, b) => a - b);
     if (ids.length !== d.materials.length) throw new HttpError(400, 'A material may only appear once per processing operation');
     const materials = await client.query(
@@ -139,9 +177,10 @@ export async function processMaterials(ownerId: number, d: any) {
       }
     }
     const operation = await client.query(
-      `INSERT INTO raw_material_processing(owner_id,processing_date,feed_product_id,quantity_bags,remarks)
-       VALUES($1,$2,$3,$4,$5) RETURNING *`,
-      [ownerId, d.date, d.feed_product_id, d.quantity_bags, d.remarks]
+      `INSERT INTO raw_material_processing
+       (owner_id,processing_date,feed_product_id,quantity_bags,produced_quantity,produced_unit,remarks)
+       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [ownerId, d.date, feed.rows[0].id, quantityBags, producedQuantity, producedUnit, d.remarks]
     );
     for (const line of d.materials) {
       const material = materialMap.get(line.material_id);
@@ -155,8 +194,18 @@ export async function processMaterials(ownerId: number, d: any) {
     await client.query(
       `INSERT INTO feed_purchases(owner_id,delivery_date,feed_type,feed_product_id,bags,cost_per_bag,source)
        VALUES($1,$2,$3,$4,$5,0,'PROCESSING')`,
-      [ownerId, d.date, feed.rows[0].name, d.feed_product_id, d.quantity_bags]
+      [ownerId, d.date, feed.rows[0].name, feed.rows[0].id, quantityBags]
     );
-    return { ...operation.rows[0], feed_product_name: feed.rows[0].name, materials: d.materials };
+    return {
+      ...operation.rows[0],
+      feed_product_name: feed.rows[0].name,
+      produced_quantity: producedQuantity,
+      produced_unit: producedUnit,
+      materials: d.materials.map((line: any) => ({
+        ...line,
+        name: materialMap.get(line.material_id).name,
+        unit: materialMap.get(line.material_id).unit,
+      })),
+    };
   });
 }

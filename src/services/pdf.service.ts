@@ -9,6 +9,16 @@ const printer = new PdfPrinter({
 });
 
 const rs = (n: number) => 'Rs. ' + Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const quantity = (n: number) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+const eggItemDescription = (item: any) => {
+  const eggs = Number(item.egg_quantity);
+  const unit = item.egg_unit;
+  const label = unit === 'crate' ? 'Crates' : unit === 'tray' ? 'Trays' : null;
+  const billedQuantity = label
+    ? `${quantity(Number(item.quantity))} ${label} (${quantity(eggs)} eggs)`
+    : `${quantity(eggs)} Eggs`;
+  return `${billedQuantity} @ ${rs(Number(item.unit_price))} / egg = ${rs(Number(item.amount))}`;
+};
 const GREEN = '#047857';
 const GREY = '#78716C';
 
@@ -48,9 +58,13 @@ export function buildInvoicePdf(inv: any, items: any[], farm: any): Promise<Buff
               text: t, bold: true, color: '#FFFFFF', fillColor: GREEN, alignment: i === 0 ? 'left' : 'right', margin: [4, 4, 4, 4],
             })),
             ...items.map((it) => [
-              { text: it.description, margin: [4, 3, 4, 3] },
+              { text: inv.invoice_type === 'egg_sale' && it.egg_unit
+                ? eggItemDescription(it)
+                : it.description, margin: [4, 3, 4, 3] },
               { text: String(it.quantity), alignment: 'right', margin: [4, 3, 4, 3] },
-              { text: rs(it.unit_price), alignment: 'right', margin: [4, 3, 4, 3] },
+              { text: inv.invoice_type === 'egg_sale' && it.egg_unit
+                ? `${rs(it.unit_price)} / egg`
+                : rs(it.unit_price), alignment: 'right', margin: [4, 3, 4, 3] },
               { text: rs(it.amount), alignment: 'right', margin: [4, 3, 4, 3] },
             ]),
           ],

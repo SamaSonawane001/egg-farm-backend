@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS raw_material_processing (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE raw_material_processing ADD COLUMN IF NOT EXISTS produced_quantity NUMERIC(12,3);
+ALTER TABLE raw_material_processing ADD COLUMN IF NOT EXISTS produced_unit VARCHAR(5);
+UPDATE raw_material_processing
+SET produced_quantity = quantity_bags, produced_unit = 'bags'
+WHERE produced_quantity IS NULL OR produced_unit IS NULL;
+
 CREATE TABLE IF NOT EXISTS raw_material_logs (
   id BIGSERIAL PRIMARY KEY,
   owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -359,6 +365,7 @@ CREATE TABLE IF NOT EXISTS invoice_items (
 );
 
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_quantity INT;
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_unit VARCHAR(10);
 UPDATE invoice_items it
 SET egg_quantity = CASE
   WHEN lower(it.description) ~ '(crate|tray)' THEN round(it.quantity * 30)::int
@@ -367,6 +374,24 @@ END
 FROM invoices i
 WHERE i.id = it.invoice_id AND i.owner_id = it.owner_id AND i.invoice_type = 'egg_sale'
   AND it.egg_quantity IS NULL;
+
+UPDATE invoice_items it
+SET egg_unit = CASE
+  WHEN it.egg_quantity = round(it.quantity * 30)::int AND lower(it.description) ~ 'tray' THEN 'tray'
+  WHEN it.egg_quantity = round(it.quantity * 30)::int THEN 'crate'
+  WHEN it.egg_quantity = round(it.quantity)::int THEN 'eggs'
+  ELSE NULL
+END
+FROM invoices i
+WHERE i.id = it.invoice_id AND i.owner_id = it.owner_id AND i.invoice_type = 'egg_sale'
+  AND it.egg_unit IS NULL;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoice_items_egg_unit_check') THEN
+    ALTER TABLE invoice_items ADD CONSTRAINT invoice_items_egg_unit_check
+      CHECK (egg_unit IS NULL OR egg_unit IN ('eggs','crate','tray'));
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_flock_owner ON flock_batches(owner_id, arrival_date DESC);
 CREATE INDEX IF NOT EXISTS idx_mort_owner ON mortality_logs(owner_id, log_date DESC);

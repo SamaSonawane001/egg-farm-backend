@@ -18,7 +18,9 @@ const medicineBody = z.object({
   min_alert_level: z.coerce.number().min(0).refine((n) => Math.abs(n * 1000 - Math.round(n * 1000)) < 1e-8, 'Use at most 3 decimal places'),
 });
 const inwardBody = z.object({
-  medicine_id: z.coerce.number().int().positive(),
+  medicine_id: z.coerce.number().int().positive().optional(),
+  medicine_name: z.string().trim().min(1).max(120).optional(),
+  category: z.enum(['Antibiotic', 'Vitamin', 'Vaccine', 'Sanitizer']).optional(),
   quantity: quantity3,
   unit: z.enum(units),
   batch_number: z.string().trim().min(1).max(120),
@@ -29,6 +31,13 @@ const inwardBody = z.object({
   bill_image_url: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().url().max(2048).nullable()),
   bill_number: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().trim().max(100).nullable()),
   vendor_name: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().trim().max(150).nullable()),
+}).superRefine((body, context) => {
+  if (!body.medicine_id && !body.medicine_name) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['medicine_name'], message: 'Medicine name is required' });
+  }
+  if (!body.medicine_id && !body.category) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['category'], message: 'Medicine category is required' });
+  }
 });
 const usageBody = z.object({
   medicine_id: z.coerce.number().int().positive(),

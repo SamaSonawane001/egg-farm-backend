@@ -19,7 +19,10 @@ export async function listMedicines(ownerId: number) {
             COALESCE(SUM(s.remaining),0) AS current_stock,
             COALESCE(SUM(s.remaining) FILTER (WHERE s.expiry_date >= CURRENT_DATE),0) AS available_stock,
             MIN(s.expiry_date) FILTER (WHERE s.remaining > 0) AS nearest_expiry,
-            MIN(s.expiry_date) FILTER (WHERE s.remaining > 0) AS expiry
+            MIN(s.expiry_date) FILTER (WHERE s.remaining > 0) AS expiry,
+            (SELECT string_agg(DISTINCT b.batch_number, ' ')
+             FROM medicine_batches b
+             WHERE b.owner_id=m.owner_id AND b.medicine_id=m.id) AS batch_numbers
      FROM medicines m
      LEFT JOIN batch_stock s ON s.medicine_id=m.id AND s.owner_id=m.owner_id
      WHERE m.owner_id=$1
@@ -64,23 +67,39 @@ export async function deleteMedicine(ownerId: number, id: number) {
 export async function receiveMedicine(ownerId: number, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
-    const medicine = await client.query(
-      'SELECT id,unit FROM medicines WHERE id=$1 AND owner_id=$2 FOR UPDATE',
-      [d.medicine_id, ownerId]
-    );
+    let medicine = d.medicine_id
+      ? await client.query(
+          'SELECT id,name,category,unit FROM medicines WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+          [d.medicine_id, ownerId]
+        )
+      : await client.query(
+          'SELECT id,name,category,unit FROM medicines WHERE owner_id=$1 AND lower(trim(name))=lower(trim($2)) FOR UPDATE',
+          [ownerId, d.medicine_name]
+        );
+    if (!d.medicine_id && !medicine.rows.length) {
+      const created = await client.query(
+        `INSERT INTO medicines(owner_id,name,category,unit)
+         VALUES($1,$2,$3,$4) RETURNING id,name,category,unit`,
+        [ownerId, d.medicine_name.trim(), d.category, d.unit]
+      );
+      medicine = created;
+    }
     if (!medicine.rows.length) throw new HttpError(404, 'Medicine not found');
     if (medicine.rows[0].unit !== d.unit) throw new HttpError(400, 'Unit must match the medicine unit');
+    if (d.category && medicine.rows[0].category !== d.category) {
+      throw new HttpError(400, 'Category must match the selected medicine');
+    }
     const result = await client.query(
       `INSERT INTO medicine_batches
        (owner_id,medicine_id,batch_number,expiry_date,received_quantity,unit,total_cost,received_date,remarks)
        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [ownerId, d.medicine_id, d.batch_number, d.expiry_date, d.quantity, d.unit, d.total_cost, d.date, d.remarks]
+      [ownerId, medicine.rows[0].id, d.batch_number, d.expiry_date, d.quantity, d.unit, d.total_cost, d.date, d.remarks]
     );
     await client.query(
       `INSERT INTO medicine_logs
        (owner_id,medicine_id,event_type,quantity,unit,log_date,remarks,batch_id,bill_image_url,bill_number,vendor_name)
        VALUES($1,$2,'INWARD',$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [ownerId, d.medicine_id, d.quantity, d.unit, d.date, d.remarks, result.rows[0].id,
+      [ownerId, medicine.rows[0].id, d.quantity, d.unit, d.date, d.remarks, result.rows[0].id,
         d.bill_image_url, d.bill_number, d.vendor_name]
     );
     return result.rows[0];
@@ -165,7 +184,8 @@ export async function listUsage(ownerId: number, from?: string, to?: string) {
 export async function listLogs(ownerId: number, from?: string, to?: string) {
   return query(
     `SELECT l.*,l.event_type AS transaction_type,l.log_date AS transaction_date,
-            m.name AS medicine_name,b.batch_number,b.expiry_date,b.total_cost,
+            m.name AS medicine_name,m.category AS medicine_category,
+            b.batch_number,b.expiry_date,b.total_cost,
             f.batch_name AS flock_name,
             CASE WHEN l.usage_id IS NULL THEN NULL
                  ELSE (SELECT json_agg(json_build_object(

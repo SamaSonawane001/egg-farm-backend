@@ -15,11 +15,43 @@ const body = z.object({
       z.object({
         description: z.string().trim().min(1).max(255),
         quantity: z.coerce.number().positive(),
-        unit_price: z.coerce.number().min(0),
+        unit_price: z.coerce.number().min(0).refine((n) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-8, 'Use at most 2 decimal places'),
+        egg_unit: z.enum(['eggs', 'crate', 'tray']).nullable().optional(),
         egg_quantity: z.coerce.number().int().positive().nullable().optional(),
       })
     )
     .min(1, 'Add at least one line item'),
+}).superRefine((invoice, context) => {
+  invoice.items.forEach((item, index) => {
+    if (invoice.invoice_type === 'egg_sale') {
+      if (!item.egg_unit) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'egg_unit'],
+          message: 'Choose an egg billing unit',
+        });
+      } else if (item.quantity !== Math.floor(item.quantity)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'quantity'],
+          message: 'Egg and crate quantities must be whole numbers',
+        });
+      }
+      if (item.egg_quantity == null) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'egg_quantity'],
+          message: 'Egg quantity is required for egg sales',
+        });
+      }
+    } else if (item.egg_unit != null || item.egg_quantity != null) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['items', index, 'egg_unit'],
+        message: 'Egg billing fields are only valid for egg-sale invoices',
+      });
+    }
+  });
 });
 
 function sendPdf(res: Response, buffer: Buffer, invoiceNo: string) {
