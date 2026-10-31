@@ -18,4 +18,6 @@ export const env = {
   publicUrl: (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/$/, ''),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   autoMigrate: process.env.AUTO_MIGRATE !== 'false',
+  supabaseUrl: (process.env.SUPABASE_URL || '').trim(),
+  supabaseServiceRoleKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim(),
 };

@@ -13,7 +13,10 @@ export function errorHandler(err: any, _req: Request, res: Response, _next: Next
   if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
   if (err?.code === '23505') return res.status(409).json({ error: 'Duplicate record' });
   if (err?.code === '23503') return res.status(409).json({ error: 'Record is referenced by other data' });
-  if (err?.name === 'MulterError') return res.status(400).json({ error: err.message });
+  if (err?.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Bill file must be 5 MB or smaller' });
+    return res.status(400).json({ error: 'Invalid file upload' });
+  }
   console.error(err);
   res.status(500).json({ error: 'Internal server error' });
 }

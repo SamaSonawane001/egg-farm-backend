@@ -167,6 +167,7 @@ export async function updatePurchase(ownerId: number, id: number, d: any) {
     const existing = await client.query('SELECT * FROM feed_purchases WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
     if (!existing.rows.length) throw new HttpError(404, 'Feed purchase not found');
     const old = existing.rows[0];
+    if (old.source === 'PROCESSING') throw new HttpError(400, 'Feed created by raw-material processing cannot be edited');
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
     if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
     const remaining = await remainingForProduct(client, ownerId, old.feed_product_id, undefined, id);
@@ -188,8 +189,9 @@ export async function updatePurchase(ownerId: number, id: number, d: any) {
 export async function deletePurchase(ownerId: number, id: number) {
   await withTx(async (client) => {
     await lockOwner(client, ownerId);
-    const existing = await client.query('SELECT feed_product_id FROM feed_purchases WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
+    const existing = await client.query('SELECT feed_product_id,source FROM feed_purchases WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
     if (!existing.rows.length) throw new HttpError(404, 'Feed purchase not found');
+    if (existing.rows[0].source === 'PROCESSING') throw new HttpError(400, 'Feed created by raw-material processing cannot be deleted');
     const remaining = await remainingForProduct(client, ownerId, existing.rows[0].feed_product_id, undefined, id);
     if (remaining < 0) throw new HttpError(400, 'Cannot delete this delivery because feed of this type has already been used');
     await client.query('DELETE FROM feed_purchases WHERE id=$1 AND owner_id=$2', [id, ownerId]);

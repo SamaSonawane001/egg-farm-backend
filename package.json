@@ -10,6 +10,7 @@
     "db:init": "ts-node --transpile-only src/config/migrate.ts"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.49.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

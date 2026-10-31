@@ -64,8 +64,163 @@ CREATE TABLE IF NOT EXISTS feed_purchases (
   bags NUMERIC(12,2) NOT NULL CHECK (bags > 0),
   cost_per_bag NUMERIC(12,2) NOT NULL CHECK (cost_per_bag >= 0),
   total_cost NUMERIC(14,2) GENERATED ALWAYS AS (bags * cost_per_bag) STORED,
+  source VARCHAR(20) NOT NULL DEFAULT 'PURCHASE' CHECK (source IN ('PURCHASE','PROCESSING')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'PURCHASE';
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'feed_purchases_source_check') THEN
+    ALTER TABLE feed_purchases ADD CONSTRAINT feed_purchases_source_check CHECK (source IN ('PURCHASE','PROCESSING'));
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS raw_materials (
+  id BIGSERIAL PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name VARCHAR(120) NOT NULL,
+  unit VARCHAR(30) NOT NULL,
+  min_alert_threshold NUMERIC(12,3) NOT NULL DEFAULT 0 CHECK (min_alert_threshold >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_owner_name_ci
+  ON raw_materials(owner_id, lower(trim(name)));
+
+DO $$ BEGIN
+  IF to_regclass('public.raw_material_transactions') IS NOT NULL
+     AND to_regclass('public.raw_material_logs') IS NULL THEN
+    ALTER TABLE raw_material_transactions RENAME TO raw_material_logs;
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS raw_material_processing (
+  id BIGSERIAL PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  processing_date DATE NOT NULL,
+  feed_product_id BIGINT NOT NULL REFERENCES feed_products(id) ON DELETE RESTRICT,
+  quantity_bags NUMERIC(12,2) NOT NULL CHECK (quantity_bags > 0),
+  remarks TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS raw_material_logs (
+  id BIGSERIAL PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  material_id BIGINT NOT NULL REFERENCES raw_materials(id) ON DELETE RESTRICT,
+  transaction_type VARCHAR(30) NOT NULL CHECK (transaction_type IN ('INWARD','OUTWARD_PROCESSING')),
+  quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
+  unit VARCHAR(30) NOT NULL,
+  transaction_date DATE NOT NULL,
+  supplier VARCHAR(160),
+  rate_per_unit NUMERIC(14,3) CHECK (rate_per_unit IS NULL OR rate_per_unit >= 0),
+  total_amount NUMERIC(14,2) CHECK (total_amount IS NULL OR total_amount >= 0),
+  remarks TEXT,
+  processing_id BIGINT REFERENCES raw_material_processing(id) ON DELETE CASCADE,
+  bill_image_url TEXT,
+  bill_number VARCHAR(100),
+  vendor_name VARCHAR(150),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_image_url TEXT;
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_number VARCHAR(100);
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(150);
+
+CREATE TABLE IF NOT EXISTS medicines (
+  id BIGSERIAL PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name VARCHAR(120) NOT NULL,
+  category VARCHAR(20) NOT NULL CHECK (category IN ('Antibiotic','Vitamin','Vaccine','Sanitizer')),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
+  min_alert_level NUMERIC(12,3) NOT NULL DEFAULT 0 CHECK (min_alert_level >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_owner_name_ci
+  ON medicines(owner_id, lower(trim(name)));
+
+CREATE TABLE IF NOT EXISTS medicine_batches (
+  id BIGSERIAL PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id BIGINT NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  batch_number VARCHAR(120) NOT NULL,
+  expiry_date DATE NOT NULL,
+  received_quantity NUMERIC(12,3) NOT NULL CHECK (received_quantity > 0),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
+  total_cost NUMERIC(14,2) NOT NULL CHECK (total_cost >= 0),
+  received_date DATE NOT NULL,
+  remarks TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS medicine_usage (
+  id BIGSERIAL PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id BIGINT NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  usage_date DATE NOT NULL,
+  quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
+  flock_id BIGINT NOT NULL REFERENCES flock_batches(id) ON DELETE RESTRICT,
+  admin_route VARCHAR(20) NOT NULL CHECK (admin_route IN ('Water','Feed','Spray','Injection')),
+  remarks TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS medicine_usage_allocations (
+  id BIGSERIAL PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  usage_id BIGINT NOT NULL REFERENCES medicine_usage(id) ON DELETE CASCADE,
+  batch_id BIGINT NOT NULL REFERENCES medicine_batches(id) ON DELETE RESTRICT,
+  quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0)
+);
+
+CREATE TABLE IF NOT EXISTS medicine_logs (
+  id BIGSERIAL PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id BIGINT NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  event_type VARCHAR(10) NOT NULL CHECK (event_type IN ('INWARD','USED')),
+  quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
+  flock_id BIGINT REFERENCES flock_batches(id) ON DELETE RESTRICT,
+  admin_route VARCHAR(20) CHECK (admin_route IS NULL OR admin_route IN ('Water','Feed','Spray','Injection')),
+  log_date DATE NOT NULL,
+  remarks TEXT,
+  batch_id BIGINT REFERENCES medicine_batches(id) ON DELETE RESTRICT,
+  usage_id BIGINT REFERENCES medicine_usage(id) ON DELETE CASCADE,
+  bill_image_url TEXT,
+  bill_number VARCHAR(100),
+  vendor_name VARCHAR(150),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (
+    (event_type='INWARD' AND batch_id IS NOT NULL AND usage_id IS NULL AND flock_id IS NULL AND admin_route IS NULL)
+    OR
+    (event_type='USED' AND usage_id IS NOT NULL AND batch_id IS NULL AND flock_id IS NOT NULL AND admin_route IS NOT NULL)
+  )
+);
+
+ALTER TABLE medicine_logs ADD COLUMN IF NOT EXISTS bill_image_url TEXT;
+ALTER TABLE medicine_logs ADD COLUMN IF NOT EXISTS bill_number VARCHAR(100);
+ALTER TABLE medicine_logs ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(150);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medicine_logs_batch
+  ON medicine_logs(owner_id,batch_id) WHERE batch_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medicine_logs_usage
+  ON medicine_logs(owner_id,usage_id) WHERE usage_id IS NOT NULL;
+
+INSERT INTO medicine_logs
+  (owner_id,medicine_id,event_type,quantity,unit,log_date,remarks,batch_id,created_at)
+SELECT b.owner_id,b.medicine_id,'INWARD',b.received_quantity,b.unit,b.received_date,b.remarks,b.id,b.created_at
+FROM medicine_batches b
+ON CONFLICT DO NOTHING;
+
+INSERT INTO medicine_logs
+  (owner_id,medicine_id,event_type,quantity,unit,flock_id,admin_route,log_date,remarks,usage_id,created_at)
+SELECT u.owner_id,u.medicine_id,'USED',u.quantity,u.unit,u.flock_id,u.admin_route,u.usage_date,u.remarks,u.id,u.created_at
+FROM medicine_usage u
+ON CONFLICT DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS feed_usage (
   id BIGSERIAL PRIMARY KEY,
@@ -218,6 +373,16 @@ CREATE INDEX IF NOT EXISTS idx_mort_owner ON mortality_logs(owner_id, log_date D
 CREATE INDEX IF NOT EXISTS idx_mort_batch ON mortality_logs(batch_id);
 CREATE INDEX IF NOT EXISTS idx_feedp_owner ON feed_purchases(owner_id, delivery_date DESC);
 CREATE INDEX IF NOT EXISTS idx_feedp_product ON feed_purchases(owner_id, feed_product_id, delivery_date DESC);
+DROP INDEX IF EXISTS idx_raw_material_tx_owner_date;
+DROP INDEX IF EXISTS idx_raw_material_tx_material;
+CREATE INDEX IF NOT EXISTS idx_raw_material_logs_owner_date ON raw_material_logs(owner_id, transaction_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_material_logs_material ON raw_material_logs(owner_id, material_id, transaction_date DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_material_processing_owner_date ON raw_material_processing(owner_id, processing_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_batches_owner_item_expiry ON medicine_batches(owner_id, medicine_id, expiry_date);
+CREATE INDEX IF NOT EXISTS idx_medicine_usage_owner_date ON medicine_usage(owner_id, usage_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_usage_alloc_batch ON medicine_usage_allocations(owner_id, batch_id);
+CREATE INDEX IF NOT EXISTS idx_medicine_logs_owner_date ON medicine_logs(owner_id, log_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_logs_item ON medicine_logs(owner_id, medicine_id, log_date DESC);
 CREATE INDEX IF NOT EXISTS idx_feedu_owner ON feed_usage(owner_id, usage_date DESC);
 CREATE INDEX IF NOT EXISTS idx_feedu_owner_type ON feed_usage(owner_id, lower(trim(feed_type)));
 CREATE INDEX IF NOT EXISTS idx_feedu_product ON feed_usage(owner_id, feed_product_id, usage_date DESC);
@@ -233,7 +398,7 @@ CREATE INDEX IF NOT EXISTS idx_invitems_inv ON invoice_items(invoice_id);
 DO $$
 DECLARE t TEXT;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage','egg_production','invoices','invoice_items']
+  FOREACH t IN ARRAY ARRAY['flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage','egg_production','invoices','invoice_items','raw_materials','raw_material_processing','raw_material_logs','medicines','medicine_batches','medicine_usage','medicine_usage_allocations','medicine_logs']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);
