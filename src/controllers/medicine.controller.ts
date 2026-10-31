@@ -59,6 +59,15 @@ function getDateFilters(req: any) {
 }
 
 export const list = asyncHandler(async (req, res) => ok(res, await svc.listMedicines(req.ownerId)));
+export const details = asyncHandler(async (req, res) => {
+  const id = idParam(req.params.id);
+  const month = z.coerce.number().int().min(1).max(12)
+    .optional().parse(req.query.month) ?? new Date().getMonth() + 1;
+  const year = z.coerce.number().int().min(2000).max(2100)
+    .optional().parse(req.query.year) ?? new Date().getFullYear();
+  const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
+  ok(res, await svc.getMedicineDetails(req.ownerId, id, monthStart));
+});
 export const create = asyncHandler(async (req, res) => {
   const result = await svc.createMedicine(req.ownerId, medicineBody.parse(req.body));
   ok(res, result, result.duplicate ? 200 : 201);
@@ -74,7 +83,41 @@ export const inward = asyncHandler(async (req, res) => {
   assertTenantBillUrl(req.ownerId, 'medicines', body.bill_image_url);
   ok(res, await svc.receiveMedicine(req.ownerId, body), 201);
 });
+export const stockForMedicine = asyncHandler(async (req, res) => {
+  const body = inwardBody.parse({
+    ...req.body,
+    medicine_id: idParam(req.params.id),
+  });
+  assertTenantBillUrl(req.ownerId, 'medicines', body.bill_image_url);
+  ok(res, await svc.receiveMedicine(req.ownerId, body), 201);
+});
+export const updateStockForMedicine = asyncHandler(async (req, res) => {
+  const body = inwardBody.parse({
+    ...req.body,
+    medicine_id: idParam(req.params.id),
+  });
+  assertTenantBillUrl(req.ownerId, 'medicines', body.bill_image_url);
+  ok(res, await svc.updateMedicineBatch(
+    req.ownerId,
+    idParam(req.params.id),
+    idParam(req.params.batchId),
+    body,
+  ));
+});
+export const deleteStockForMedicine = asyncHandler(async (req, res) => {
+  await svc.deleteMedicineBatch(
+    req.ownerId,
+    idParam(req.params.id),
+    idParam(req.params.batchId),
+  );
+  ok(res, { deleted: true });
+});
 export const usage = asyncHandler(async (req, res) => ok(res, await svc.createUsage(req.ownerId, usageBody.parse(req.body)), 201));
+export const usageForMedicine = asyncHandler(async (req, res) =>
+  ok(res, await svc.createUsage(req.ownerId, usageBody.parse({
+    ...req.body,
+    medicine_id: idParam(req.params.id),
+  })), 201));
 export const listUsage = asyncHandler(async (req, res) => {
   const { from, to } = getDateFilters(req);
   ok(res, await svc.listUsage(req.ownerId, from, to));

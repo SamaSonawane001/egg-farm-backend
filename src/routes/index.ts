@@ -60,10 +60,16 @@ r.delete('/raw-materials/:id', RM.remove);
 r.post('/raw-materials/inward', RM.inward);
 r.get('/raw-materials/logs', RM.logs);
 r.get('/raw-materials/processing', RM.processing);
+r.get('/raw-materials/:id', RM.details);
 r.post('/raw-materials/processing', RM.createProcessing);
 
 r.get('/medicines', M.list);
 r.post('/medicines', M.create);
+r.get('/medicines/:id/details', M.details);
+r.post('/medicines/:id/stock', M.stockForMedicine);
+r.put('/medicines/:id/stock/:batchId', M.updateStockForMedicine);
+r.delete('/medicines/:id/stock/:batchId', M.deleteStockForMedicine);
+r.post('/medicines/:id/usage', M.usageForMedicine);
 r.put('/medicines/:id', M.update);
 r.delete('/medicines/:id', M.remove);
 r.post('/medicines/inward', M.inward);

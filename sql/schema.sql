@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS feed_purchases (
   owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   delivery_date DATE NOT NULL,
   feed_type VARCHAR(120) NOT NULL,
-  bags NUMERIC(12,2) NOT NULL CHECK (bags > 0),
+  bags NUMERIC(12,5) NOT NULL CHECK (bags > 0),
   cost_per_bag NUMERIC(12,2) NOT NULL CHECK (cost_per_bag >= 0),
   total_cost NUMERIC(14,2) GENERATED ALWAYS AS (bags * cost_per_bag) STORED,
   source VARCHAR(20) NOT NULL DEFAULT 'PURCHASE' CHECK (source IN ('PURCHASE','PROCESSING')),
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS raw_material_processing (
   owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   processing_date DATE NOT NULL,
   feed_product_id BIGINT NOT NULL REFERENCES feed_products(id) ON DELETE RESTRICT,
-  quantity_bags NUMERIC(12,2) NOT NULL CHECK (quantity_bags > 0),
+  quantity_bags NUMERIC(12,5) NOT NULL CHECK (quantity_bags > 0),
   remarks TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -130,6 +130,39 @@ CREATE TABLE IF NOT EXISTS raw_material_logs (
 ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_image_url TEXT;
 ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_number VARCHAR(100);
 ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(150);
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS entered_quantity NUMERIC(12,3);
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS entered_unit VARCHAR(30);
+
+UPDATE raw_material_logs
+SET entered_quantity = quantity, entered_unit = unit
+WHERE entered_quantity IS NULL OR entered_unit IS NULL;
+
+UPDATE raw_material_logs l
+SET quantity = ROUND(
+      l.quantity * CASE l.unit
+        WHEN 'quintal' THEN 100
+        WHEN 'bags' THEN COALESCE(NULLIF(u.kg_per_bag, 0), 50)
+        ELSE 1
+      END,
+      3
+    ),
+    unit = 'kg'
+FROM raw_materials m
+JOIN users u ON u.id = m.owner_id
+WHERE l.material_id = m.id AND l.owner_id = m.owner_id AND l.unit <> 'kg';
+
+UPDATE raw_materials m
+SET min_alert_threshold = ROUND(
+      m.min_alert_threshold * CASE m.unit
+        WHEN 'quintal' THEN 100
+        WHEN 'bags' THEN COALESCE(NULLIF(u.kg_per_bag, 0), 50)
+        ELSE 1
+      END,
+      3
+    ),
+    unit = 'kg'
+FROM users u
+WHERE u.id = m.owner_id AND m.unit <> 'kg';
 
 DO $$ BEGIN
   IF EXISTS (

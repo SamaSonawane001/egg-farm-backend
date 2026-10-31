@@ -35,6 +35,83 @@ export async function listMedicines(ownerId: number) {
   );
 }
 
+export async function getMedicineDetails(
+  ownerId: number,
+  id: number,
+  monthStart: string,
+) {
+  const [medicineRows, purchases, usage] = await Promise.all([
+    query(
+      `WITH batch_stock AS (
+         SELECT b.id,b.owner_id,b.medicine_id,b.expiry_date,b.received_quantity,
+                b.received_quantity-COALESCE(SUM(a.quantity),0) AS remaining
+         FROM medicine_batches b
+         LEFT JOIN medicine_usage_allocations a
+           ON a.batch_id=b.id AND a.owner_id=b.owner_id
+         WHERE b.owner_id=$1 AND b.medicine_id=$2
+         GROUP BY b.id,b.owner_id,b.medicine_id,b.expiry_date,b.received_quantity
+       )
+       SELECT m.id,m.name,m.category,m.unit,m.min_alert_level,
+              COALESCE((SELECT SUM(b.received_quantity)
+                        FROM medicine_batches b
+                        WHERE b.owner_id=m.owner_id AND b.medicine_id=m.id),0) AS total_purchased,
+              COALESCE((SELECT SUM(u.quantity)
+                        FROM medicine_usage u
+                        WHERE u.owner_id=m.owner_id AND u.medicine_id=m.id),0) AS total_consumed,
+              COALESCE((SELECT SUM(s.remaining) FROM batch_stock s),0) AS current_stock,
+              COALESCE((SELECT SUM(s.remaining) FROM batch_stock s
+                        WHERE s.expiry_date >= CURRENT_DATE),0) AS available_stock,
+              COALESCE((SELECT SUM(b.total_cost)
+                        FROM medicine_batches b
+                        WHERE b.owner_id=m.owner_id AND b.medicine_id=m.id),0) AS total_spent,
+              COALESCE((SELECT SUM(u.quantity)
+                        FROM medicine_usage u
+                        WHERE u.owner_id=m.owner_id AND u.medicine_id=m.id
+                          AND u.usage_date >= $3::date
+                          AND u.usage_date < ($3::date + INTERVAL '1 month')),0) AS monthly_used,
+              MIN(s.expiry_date) FILTER (WHERE s.remaining > 0) AS nearest_expiry
+       FROM medicines m
+       LEFT JOIN batch_stock s ON s.medicine_id=m.id AND s.owner_id=m.owner_id
+       WHERE m.owner_id=$1 AND m.id=$2
+       GROUP BY m.id`,
+      [ownerId, id, monthStart],
+    ),
+    query(
+      `SELECT b.id,b.batch_number,b.expiry_date,b.received_quantity AS quantity,
+              b.unit,b.total_cost,b.received_date AS date,b.remarks,
+              l.bill_image_url,l.bill_number,l.vendor_name
+       FROM medicine_batches b
+       LEFT JOIN medicine_logs l
+         ON l.batch_id=b.id AND l.owner_id=b.owner_id
+       WHERE b.owner_id=$1 AND b.medicine_id=$2
+       ORDER BY b.received_date DESC,b.id DESC`,
+      [ownerId, id],
+    ),
+    query(
+      `SELECT u.id,u.usage_date AS date,u.quantity,u.unit,u.flock_id,
+              f.batch_name AS flock_name,u.admin_route,u.remarks,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'batch_number',b.batch_number,
+                  'expiry_date',b.expiry_date,
+                  'quantity',a.quantity
+                ) ORDER BY a.id)
+                FROM medicine_usage_allocations a
+                JOIN medicine_batches b
+                  ON b.id=a.batch_id AND b.owner_id=a.owner_id
+                WHERE a.owner_id=u.owner_id AND a.usage_id=u.id
+              ), '[]'::json) AS allocations
+       FROM medicine_usage u
+       JOIN flock_batches f ON f.id=u.flock_id AND f.owner_id=u.owner_id
+       WHERE u.owner_id=$1 AND u.medicine_id=$2
+       ORDER BY u.usage_date DESC,u.id DESC`,
+      [ownerId, id],
+    ),
+  ]);
+  if (!medicineRows.length) throw new HttpError(404, 'Medicine not found');
+  return { medicine: medicineRows[0], purchases, usage };
+}
+
 export async function createMedicine(ownerId: number, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
@@ -147,6 +224,107 @@ export async function receiveMedicine(ownerId: number, d: any) {
         d.bill_image_url, d.bill_number, d.vendor_name]
     );
     return result.rows[0];
+  });
+}
+
+export async function updateMedicineBatch(
+  ownerId: number,
+  medicineId: number,
+  batchId: number,
+  d: any,
+) {
+  return withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    const batch = await client.query(
+      `SELECT b.id,b.received_quantity,b.unit,m.unit AS medicine_unit,
+              COALESCE((
+                SELECT SUM(a.quantity)
+                FROM medicine_usage_allocations a
+                WHERE a.batch_id=b.id AND a.owner_id=b.owner_id
+              ),0) AS consumed
+       FROM medicine_batches b
+       JOIN medicines m ON m.id=b.medicine_id AND m.owner_id=b.owner_id
+       WHERE b.owner_id=$1 AND b.medicine_id=$2 AND b.id=$3
+       FOR UPDATE OF b`,
+      [ownerId, medicineId, batchId],
+    );
+    if (!batch.rows.length) throw new HttpError(404, 'Medicine batch not found');
+    if (batch.rows[0].medicine_unit !== d.unit ||
+        batch.rows[0].unit !== d.unit) {
+      throw new HttpError(400, 'Unit must match the medicine unit');
+    }
+    if (Number(d.quantity) + 0.0005 < Number(batch.rows[0].consumed)) {
+      throw new HttpError(400, 'Received quantity cannot be below the quantity already used from this batch');
+    }
+    const updated = await client.query(
+      `UPDATE medicine_batches
+       SET batch_number=$4,expiry_date=$5,received_quantity=$6,total_cost=$7,
+           received_date=$8,remarks=$9
+       WHERE owner_id=$1 AND medicine_id=$2 AND id=$3
+       RETURNING *`,
+      [
+        ownerId,
+        medicineId,
+        batchId,
+        d.batch_number,
+        d.expiry_date,
+        d.quantity,
+        d.total_cost,
+        d.date,
+        d.remarks,
+      ],
+    );
+    await client.query(
+      `UPDATE medicine_logs
+       SET quantity=$4,log_date=$5,remarks=$6,bill_image_url=$7,
+           bill_number=$8,vendor_name=$9
+       WHERE owner_id=$1 AND medicine_id=$2 AND batch_id=$3`,
+      [
+        ownerId,
+        medicineId,
+        batchId,
+        d.quantity,
+        d.date,
+        d.remarks,
+        d.bill_image_url,
+        d.bill_number,
+        d.vendor_name,
+      ],
+    );
+    return updated.rows[0];
+  });
+}
+
+export async function deleteMedicineBatch(
+  ownerId: number,
+  medicineId: number,
+  batchId: number,
+) {
+  return withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    const batch = await client.query(
+      `SELECT b.id,
+              EXISTS (
+                SELECT 1 FROM medicine_usage_allocations a
+                WHERE a.owner_id=b.owner_id AND a.batch_id=b.id
+              ) AS has_usage
+       FROM medicine_batches b
+       WHERE b.owner_id=$1 AND b.medicine_id=$2 AND b.id=$3
+       FOR UPDATE`,
+      [ownerId, medicineId, batchId],
+    );
+    if (!batch.rows.length) throw new HttpError(404, 'Medicine batch not found');
+    if (batch.rows[0].has_usage) {
+      throw new HttpError(400, 'Cannot delete a batch that has already been used');
+    }
+    await client.query(
+      'DELETE FROM medicine_logs WHERE owner_id=$1 AND medicine_id=$2 AND batch_id=$3',
+      [ownerId, medicineId, batchId],
+    );
+    await client.query(
+      'DELETE FROM medicine_batches WHERE owner_id=$1 AND medicine_id=$2 AND id=$3',
+      [ownerId, medicineId, batchId],
+    );
   });
 }
 
