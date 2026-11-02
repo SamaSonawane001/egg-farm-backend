@@ -17,15 +17,37 @@ const usageBody = z.object({
   unit: z.enum(['bags', 'kg']),
 });
 const productBody = z.object({ name: z.string().trim().min(1).max(120) });
+const listPagination = z.object({
+  limit: z.coerce.number().int().min(1).max(20).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+function parseListPagination(query: unknown) {
+  const parsed = listPagination.safeParse(query);
+  if (!parsed.success) throw new HttpError(400, 'Invalid feed history pagination');
+  return parsed.data;
+}
 
 export const stock = asyncHandler(async (req, res) => ok(res, await svc.getStock(req.ownerId)));
 export const products = asyncHandler(async (req, res) => ok(res, await svc.listProducts(req.ownerId)));
 export const createProduct = asyncHandler(async (req, res) =>
   ok(res, await svc.createProduct(req.ownerId, productBody.parse(req.body).name), 201));
 export const productDetail = asyncHandler(async (req, res) => {
-  const month = typeof req.query.month === 'string' ? req.query.month : new Date().toISOString().slice(0, 7);
+  const parsed = z.object({
+    month: z.string().optional(),
+    purchase_offset: z.coerce.number().int().min(0).default(0),
+    usage_offset: z.coerce.number().int().min(0).default(0),
+  }).safeParse(req.query);
+  if (!parsed.success) throw new HttpError(400, 'Invalid feed history pagination');
+  const month = parsed.data.month ?? new Date().toISOString().slice(0, 7);
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpError(400, 'Month must use YYYY-MM format');
-  ok(res, await svc.getProductDetail(req.ownerId, idParam(req.params.id), month));
+  ok(res, await svc.getProductDetail(
+    req.ownerId,
+    idParam(req.params.id),
+    month,
+    parsed.data.purchase_offset,
+    parsed.data.usage_offset
+  ));
 });
 export const updateProduct = asyncHandler(async (req, res) =>
   ok(res, await svc.updateProduct(req.ownerId, idParam(req.params.id), productBody.parse(req.body).name)));
@@ -33,7 +55,10 @@ export const removeProduct = asyncHandler(async (req, res) => {
   await svc.deleteProduct(req.ownerId, idParam(req.params.id));
   ok(res, { deleted: true });
 });
-export const listPurchases = asyncHandler(async (req, res) => ok(res, await svc.listPurchases(req.ownerId)));
+export const listPurchases = asyncHandler(async (req, res) => {
+  const { limit, offset } = parseListPagination(req.query);
+  ok(res, await svc.listPurchases(req.ownerId, limit, offset));
+});
 export const createPurchase = asyncHandler(async (req, res) => ok(res, await svc.createPurchase(req.ownerId, purchaseBody.parse(req.body)), 201));
 export const updatePurchase = asyncHandler(async (req, res) =>
   ok(res, await svc.updatePurchase(req.ownerId, idParam(req.params.id), purchaseBody.parse(req.body))));
@@ -42,7 +67,10 @@ export const deletePurchase = asyncHandler(async (req, res) => {
   ok(res, { deleted: true });
 });
 
-export const listUsage = asyncHandler(async (req, res) => ok(res, await svc.listUsage(req.ownerId)));
+export const listUsage = asyncHandler(async (req, res) => {
+  const { limit, offset } = parseListPagination(req.query);
+  ok(res, await svc.listUsage(req.ownerId, limit, offset));
+});
 export const createUsage = asyncHandler(async (req, res) => ok(res, await svc.createUsage(req.ownerId, usageBody.parse(req.body)), 201));
 export const updateUsage = asyncHandler(async (req, res) =>
   ok(res, await svc.updateUsage(req.ownerId, idParam(req.params.id), usageBody.parse(req.body))));

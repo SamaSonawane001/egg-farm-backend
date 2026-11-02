@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { z } from 'zod';
 import { asyncHandler, dateStr, idParam, ok, optText } from '../utils/http';
+import { HttpError } from '../utils/httpError';
 import * as svc from '../services/invoice.service';
 
 const body = z.object({
@@ -56,6 +57,10 @@ const body = z.object({
     }
   });
 });
+const pagination = z.object({
+  limit: z.coerce.number().int().min(1).max(20).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 function sendPdf(res: Response, buffer: Buffer, invoiceNo: string) {
   res.setHeader('Content-Type', 'application/pdf');
@@ -63,7 +68,11 @@ function sendPdf(res: Response, buffer: Buffer, invoiceNo: string) {
   res.send(buffer);
 }
 
-export const list = asyncHandler(async (req, res) => ok(res, await svc.list(req.ownerId)));
+export const list = asyncHandler(async (req, res) => {
+  const parsed = pagination.safeParse(req.query);
+  if (!parsed.success) throw new HttpError(400, 'Invalid invoice pagination');
+  ok(res, await svc.list(req.ownerId, parsed.data.limit, parsed.data.offset));
+});
 export const getOne = asyncHandler(async (req, res) => ok(res, await svc.getOne(req.ownerId, idParam(req.params.id))));
 export const create = asyncHandler(async (req, res) => ok(res, await svc.create(req.ownerId, body.parse(req.body)), 201));
 export const remove = asyncHandler(async (req, res) => {

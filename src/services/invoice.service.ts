@@ -3,7 +3,7 @@ import { HttpError } from '../utils/httpError';
 import { round2 } from '../utils/http';
 import { buildInvoicePdf } from './pdf.service';
 
-export const list = (ownerId: number) =>
+export const list = (ownerId: number, limit = 20, offset = 0) =>
   query(
     `SELECT i.*,
             (SELECT COUNT(*) FROM invoice_items it WHERE it.invoice_id=i.id) AS items_count,
@@ -12,8 +12,9 @@ export const list = (ownerId: number) =>
               'amount',it.amount,'egg_quantity',it.egg_quantity,'egg_unit',it.egg_unit
             ) ORDER BY it.id) FROM invoice_items it
               WHERE it.invoice_id=i.id AND it.owner_id=i.owner_id),'[]'::json) AS items
-     FROM invoices i WHERE i.owner_id=$1 ORDER BY i.created_at DESC, i.id DESC`,
-    [ownerId]
+     FROM invoices i WHERE i.owner_id=$1 ORDER BY i.created_at DESC, i.id DESC
+     LIMIT $2 OFFSET $3`,
+    [ownerId, limit, offset]
   );
 
 export const getEggStock = async (ownerId: number, client?: any) => {

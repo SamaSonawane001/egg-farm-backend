@@ -3,18 +3,7 @@ import { getStock } from './feed.service';
 import { availableStock } from './egg.service';
 
 export async function getDashboard(ownerId: number, today: string) {
-  const [birds, eggs, money, week, stock, eggStock] = await Promise.all([
-    query(
-      `SELECT COALESCE((SELECT SUM(quantity) FROM flock_batches WHERE owner_id=$1),0)
-            - COALESCE((SELECT SUM(dead_count) FROM mortality_logs WHERE owner_id=$1),0) AS active_birds`,
-      [ownerId]
-    ),
-    query(
-      `SELECT COALESCE(SUM(net_eggs) FILTER (WHERE collection_date=$2::date),0) AS today_eggs,
-              COALESCE(SUM(net_eggs),0) AS total_produced
-       FROM egg_production WHERE owner_id=$1`,
-      [ownerId, today]
-    ),
+  const [overview, stock, eggStock] = await Promise.all([
     query(
       `WITH period AS (
          SELECT date_trunc('month',$2::date)::date AS start_date,
@@ -38,42 +27,50 @@ export async function getDashboard(ownerId: number, today: string) {
          SELECT m.total_cost
          FROM medicine_batches m, period p
          WHERE m.owner_id=$1 AND m.received_date >= p.start_date AND m.received_date < p.end_date
+       ),
+       week AS (
+         SELECT to_char(d::date,'YYYY-MM-DD') AS date,
+                COALESCE(SUM(e.net_eggs),0) AS net_eggs
+         FROM generate_series($2::date - 6, $2::date, interval '1 day') d
+         LEFT JOIN egg_production e
+           ON e.collection_date=d::date AND e.owner_id=$1
+         GROUP BY d
        )
        SELECT
+         COALESCE((SELECT SUM(quantity) FROM flock_batches WHERE owner_id=$1),0)
+           - COALESCE((SELECT SUM(dead_count) FROM mortality_logs WHERE owner_id=$1),0) AS active_birds,
+         COALESCE((SELECT SUM(net_eggs) FROM egg_production
+                   WHERE owner_id=$1 AND collection_date=$2::date),0) AS today_eggs,
          COALESCE((SELECT SUM(i.grand_total) FROM invoices i, period p
                    WHERE i.owner_id=$1 AND i.invoice_date >= p.start_date AND i.invoice_date < p.end_date),0) AS month_revenue,
          COALESCE((SELECT SUM(amount) FROM expense_rows),0) AS month_expense,
          (SELECT COUNT(*) FROM expense_rows) AS month_expense_records,
          (SELECT start_date::text FROM period) AS expense_period_start,
-         (SELECT end_date::text FROM period) AS expense_period_end`,
-      [ownerId, today]
-    ),
-    query(
-      `SELECT to_char(d::date,'YYYY-MM-DD') AS date, COALESCE(SUM(e.net_eggs),0) AS net_eggs
-       FROM generate_series($2::date - 6, $2::date, interval '1 day') d
-       LEFT JOIN egg_production e ON e.collection_date = d::date AND e.owner_id=$1
-       GROUP BY d ORDER BY d`,
+         (SELECT end_date::text FROM period) AS expense_period_end,
+         COALESCE((SELECT json_agg(json_build_object('date',date,'net_eggs',net_eggs) ORDER BY date)
+                   FROM week),'[]'::json) AS last7_eggs`,
       [ownerId, today]
     ),
     getStock(ownerId),
     availableStock(ownerId),
   ]);
+  const summary = overview[0];
   console.info('Dashboard monthly expense aggregation:', {
-    periodStart: money[0].expense_period_start,
-    periodEndExclusive: money[0].expense_period_end,
-    recordsFound: Number(money[0].month_expense_records),
-    total: Number(money[0].month_expense),
+    periodStart: summary.expense_period_start,
+    periodEndExclusive: summary.expense_period_end,
+    recordsFound: Number(summary.month_expense_records),
+    total: Number(summary.month_expense),
   });
   return {
-    active_birds: birds[0].active_birds,
-    today_eggs: eggs[0].today_eggs,
+    active_birds: summary.active_birds,
+    today_eggs: summary.today_eggs,
     available_eggs: eggStock.available_eggs,
     feed_remaining_bags: stock.remaining,
     feed_low_stock: stock.low_stock,
     feed_threshold: stock.threshold,
-    month_revenue: Number(money[0].month_revenue),
-    month_expense: Number(money[0].month_expense),
-    month_profit: Number(money[0].month_revenue) - Number(money[0].month_expense),
-    last7_eggs: week,
+    month_revenue: Number(summary.month_revenue),
+    month_expense: Number(summary.month_expense),
+    month_profit: Number(summary.month_revenue) - Number(summary.month_expense),
+    last7_eggs: summary.last7_eggs,
   };
 }
