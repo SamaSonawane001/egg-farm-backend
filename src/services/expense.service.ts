@@ -59,6 +59,14 @@ export async function monthlyBreakdown(
     );
   }
   const total = [...amounts.values()].reduce((sum, amount) => sum + amount, 0);
+  const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+  const endDate = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+  console.info('Monthly expense breakdown aggregation:', {
+    periodStart: startDate,
+    periodEndExclusive: endDate,
+    recordsFound: itemizedTransactions.length,
+    total: Math.round((total + Number.EPSILON) * 100) / 100,
+  });
   const categories = [...amounts.entries()].map(([category, amount]) => ({
     category,
     amount: Math.round((amount + Number.EPSILON) * 100) / 100,

@@ -119,41 +119,33 @@ export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId
     ...(logo ? { images: { farmLogo: logo } } : {}),
     content: [
       {
+        margin: [0, 0, 0, 12],
         columns: [
           {
             width: '*',
+            margin: [0, 8, 0, 0],
             stack: [
-              { text: farm.farm_name, fontSize: 18, bold: true, color: GREEN },
-              { text: farm.owner_name, margin: [0, 2, 0, 0] },
-              { text: `Mobile: ${farm.mobile}`, color: GREY },
-              ...(farm.address ? [{ text: farm.address, color: GREY }] : []),
+              { text: farm.farm_name, fontSize: 19, bold: true, color: GREEN },
+              { text: farm.owner_name, fontSize: 10, color: GREY, margin: [0, 3, 0, 0] },
+              { text: `Mobile: ${farm.mobile}`, fontSize: 10, color: GREY, margin: [0, 3, 0, 0] },
+              ...(farm.address ? [{ text: farm.address, fontSize: 10, color: GREY, margin: [0, 3, 0, 0] }] : []),
             ],
           },
           {
-            width: 70,
+            width: 85,
             ...(logo
-              ? {
-                  table: {
-                    widths: ['*'],
-                    body: [[{ image: 'farmLogo', fit: [64, 64], alignment: 'center' }]],
-                  },
-                  layout: {
-                    hLineWidth: () => 0.5,
-                    vLineWidth: () => 0.5,
-                    hLineColor: () => '#E7E5E4',
-                    vLineColor: () => '#E7E5E4',
-                  },
-                }
+              ? { image: 'farmLogo', fit: [82, 82] }
               : { text: '' }),
             alignment: 'center',
           },
           {
             width: '*',
+            margin: [0, 8, 0, 0],
             stack: [
               { text: 'INVOICE', fontSize: 22, bold: true, alignment: 'right' },
-              { text: inv.invoice_no, alignment: 'right', color: GREY },
-              { text: `Date: ${inv.invoice_date}`, alignment: 'right', color: GREY },
-              { text: INVOICE_TYPE_LABEL[inv.invoice_type as InvoiceType] || inv.invoice_type, alignment: 'right', bold: true, color: GREEN },
+              { text: inv.invoice_no, fontSize: 10, alignment: 'right', color: GREY, margin: [0, 3, 0, 0] },
+              { text: `Date: ${inv.invoice_date}`, fontSize: 10, alignment: 'right', color: GREY, margin: [0, 3, 0, 0] },
+              { text: INVOICE_TYPE_LABEL[inv.invoice_type as InvoiceType] || inv.invoice_type, fontSize: 11, alignment: 'right', bold: true, color: GREEN, margin: [0, 3, 0, 0] },
             ],
           },
         ],
