@@ -8,14 +8,18 @@ let client: SupabaseClient | undefined;
 
 function getStorageClient(): SupabaseClient {
   if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
-    throw new HttpError(503, 'Supabase Storage uploads are not configured');
+    throw new HttpError(
+      503,
+      'Supabase Storage is not configured; set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SECRET_KEY'
+    );
   }
   if (!client) {
-    try {
-      client = createClient(env.supabaseUrl, env.supabaseServiceRoleKey);
-    } catch {
-      throw new HttpError(503, 'Supabase Storage configuration is invalid');
-    }
+    client = createClient(env.supabaseUrl, env.supabaseServiceRoleKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
   }
   return client;
 }
@@ -40,12 +44,12 @@ export async function uploadBillFile(
   assertFileSignature(file);
   const objectPath = `bills/farm_${ownerId}/${category}/${Date.now()}_${randomBytes(4).toString('hex')}_${sanitizeFilename(file.originalname)}`;
   try {
-    const { error } = await storage.storage.from('farm-receipts').upload(objectPath, file.buffer, {
+    const { error } = await storage.storage.from(env.supabaseStorageBucket).upload(objectPath, file.buffer, {
       contentType: file.mimetype,
       upsert: false,
     });
     if (error) throw error;
-    return storage.storage.from('farm-receipts').getPublicUrl(objectPath).data.publicUrl;
+    return storage.storage.from(env.supabaseStorageBucket).getPublicUrl(objectPath).data.publicUrl;
   } catch {
     throw new HttpError(502, 'Bill upload failed; please try again');
   }
@@ -110,7 +114,7 @@ export function assertTenantBillUrl(
   try {
     const url = new URL(fileUrl);
     const base = new URL(env.supabaseUrl);
-    const prefix = `${base.pathname.replace(/\/$/, '')}/storage/v1/object/public/farm-receipts/bills/farm_${ownerId}/${category}/`;
+    const prefix = `${base.pathname.replace(/\/$/, '')}/storage/v1/object/public/${env.supabaseStorageBucket}/bills/farm_${ownerId}/${category}/`;
     const objectName = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '';
     if (
       url.origin !== base.origin ||

@@ -8,6 +8,11 @@ function required(key: string): string {
 }
 
 const port = Number(process.env.PORT || 4000);
+const supabaseServiceRoleKey = [
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  process.env.SUPABASE_SECRET_KEY,
+].map((value) => value?.trim()).find(Boolean) || '';
+const supabaseStorageBucket = process.env.SUPABASE_STORAGE_BUCKET?.trim() || 'farm-receipts';
 
 export const env = {
   port,
@@ -19,5 +24,6 @@ export const env = {
   corsOrigin: process.env.CORS_ORIGIN || '*',
   autoMigrate: process.env.AUTO_MIGRATE !== 'false',
   supabaseUrl: (process.env.SUPABASE_URL || '').trim(),
-  supabaseServiceRoleKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim(),
+  supabaseServiceRoleKey,
+  supabaseStorageBucket,
 };
