@@ -15,9 +15,21 @@ export const bill = asyncHandler(async (req, res) => {
 });
 
 export const avatar = asyncHandler(async (req, res) => {
-  if (!req.file) throw new HttpError(400, 'Avatar image is required');
+  try {
+    if (!req.file?.buffer?.length) {
+      throw new HttpError(400, 'Avatar image is required');
+    }
 
-  const avatarUrl = await uploadProfileAvatar(req.ownerId, req.file);
-  const user = await authService.updateProfile(req.ownerId, { avatar_url: avatarUrl });
-  res.json({ success: true, avatarUrl, user });
+    const avatarUrl = await uploadProfileAvatar(req.ownerId, req.file);
+    const user = await authService.updateProfile(req.ownerId, { avatar_url: avatarUrl });
+    res.json({ success: true, avatarUrl, user });
+  } catch (error) {
+    console.error('Avatar route failed:', error);
+    const message = error instanceof Error
+      ? error.message
+      : error && typeof error === 'object' && 'message' in error
+        ? String(error.message)
+        : 'Avatar upload failed';
+    res.status(500).json({ success: false, error: message });
+  }
 });

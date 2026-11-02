@@ -56,22 +56,49 @@ export async function uploadBillFile(
 }
 
 export async function uploadProfileAvatar(ownerId: number, file: Express.Multer.File): Promise<string> {
-  const imageType = detectProfileImageType(file.buffer);
-  if (!imageType) {
-    throw new HttpError(400, 'Avatar contents do not match a supported image type');
-  }
+  console.log('Supabase configured:', {
+    url: Boolean(env.supabaseUrl),
+    serviceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()),
+    secretKey: Boolean(process.env.SUPABASE_SECRET_KEY?.trim()),
+  });
+  console.log('Avatar upload file:', {
+    name: file.originalname,
+    size: file.size,
+    mimeType: file.mimetype,
+  });
 
-  const storage = getStorageClient();
-  const objectPath = `avatars/${ownerId}/profile_photo_${Date.now()}.${imageType.extension}`;
   try {
-    const { error } = await storage.storage.from('farm-profiles').upload(objectPath, file.buffer, {
-      contentType: imageType.contentType,
-      upsert: false,
+    if (!file.buffer?.length) {
+      throw new HttpError(400, 'Avatar image data is missing');
+    }
+
+    const imageType = detectProfileImageType(file.buffer);
+    if (!imageType) {
+      throw new HttpError(400, 'Avatar contents do not match a supported image type');
+    }
+
+    const objectPath = `avatars/${ownerId}/profile_photo_${Date.now()}_${randomBytes(4).toString('hex')}.${imageType.extension}`;
+    console.log('Avatar upload target:', {
+      bucket: env.supabaseStorageBucket,
+      filePath: objectPath,
     });
-    if (error) throw error;
-    return storage.storage.from('farm-profiles').getPublicUrl(objectPath).data.publicUrl;
-  } catch {
-    throw new HttpError(502, 'Avatar upload failed; please try again');
+
+    const storage = getStorageClient();
+    const bucket = storage.storage.from(env.supabaseStorageBucket);
+    const { error } = await bucket.upload(objectPath, file.buffer, {
+      contentType: imageType.contentType,
+      upsert: true,
+    });
+    if (error) {
+      console.error('Supabase Upload Error:', error);
+      throw error;
+    }
+
+    console.log('Avatar upload complete:', { bucket: env.supabaseStorageBucket, filePath: objectPath });
+    return bucket.getPublicUrl(objectPath).data.publicUrl;
+  } catch (error) {
+    console.error('Avatar upload failed:', error);
+    throw error;
   }
 }
 

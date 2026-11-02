@@ -37,13 +37,16 @@ function resolveFarmLogoUrl(logoUrl: string | null | undefined, ownerId: number)
 
     if (env.supabaseUrl) {
       const supabase = new URL(env.supabaseUrl);
-      const avatarPrefix = `${supabase.pathname.replace(/\/$/, '')}/storage/v1/object/public/farm-profiles/avatars/${ownerId}/`;
-      if (
-        url.origin === supabase.origin &&
-        url.pathname.startsWith(avatarPrefix) &&
-        /^profile_photo_\d+\.(?:jpg|png|webp)$/i.test(url.pathname.slice(avatarPrefix.length))
-      ) {
-        return url;
+      const avatarBuckets = new Set([env.supabaseStorageBucket, 'farm-profiles']);
+      for (const bucketName of avatarBuckets) {
+        const avatarPrefix = `${supabase.pathname.replace(/\/$/, '')}/storage/v1/object/public/${bucketName}/avatars/${ownerId}/`;
+        if (
+          url.origin === supabase.origin &&
+          url.pathname.startsWith(avatarPrefix) &&
+          /^profile_photo_\d+(?:_[a-f0-9]{8})?\.(?:jpg|png|webp)$/i.test(url.pathname.slice(avatarPrefix.length))
+        ) {
+          return url;
+        }
       }
     }
 

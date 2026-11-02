@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import crypto from 'crypto';
@@ -37,7 +38,7 @@ export const uploadAvatar = multer({
   },
 }).single('avatar');
 
-export const uploadProfileAvatar = multer({
+const profileAvatarParser = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 3 * 1024 * 1024,
@@ -55,6 +56,32 @@ export const uploadProfileAvatar = multer({
     }
   },
 }).single('avatar');
+
+export const uploadProfileAvatar = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  profileAvatarParser(req, res, (error) => {
+    if (!error) {
+      next();
+      return;
+    }
+
+    console.error('Avatar multipart upload failed:', error);
+    const status = error instanceof HttpError
+      ? error.status
+      : error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE'
+        ? 413
+        : error instanceof multer.MulterError
+          ? 400
+          : 500;
+    res.status(status).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Avatar upload failed',
+    });
+  });
+};
 
 export const uploadBill = multer({
   storage: multer.memoryStorage(),
