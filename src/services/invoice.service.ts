@@ -122,8 +122,8 @@ export async function remove(ownerId: number, id: number) {
 
 export async function pdfFor(ownerId: number, id: number) {
   const inv = await getOne(ownerId, id);
-  const farm = (await query('SELECT farm_name, owner_name, mobile, address FROM users WHERE id=$1', [ownerId]))[0];
-  return { buffer: await buildInvoicePdf(inv, inv.items, farm), invoice: inv };
+  const farm = (await query('SELECT farm_name, owner_name, mobile, address, avatar_url FROM users WHERE id=$1', [ownerId]))[0];
+  return { buffer: await buildInvoicePdf(inv, inv.items, farm, ownerId), invoice: inv };
 }
 
 /** Public, unguessable share link (UUID token) used in WhatsApp messages. */

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { auth } from '../middlewares/auth';
-import { uploadAvatar, uploadBill } from '../middlewares/upload';
+import { uploadAvatar, uploadBill, uploadProfileAvatar } from '../middlewares/upload';
 import * as A from '../controllers/auth.controller';
 import * as F from '../controllers/flock.controller';
 import * as D from '../controllers/feed.controller';
@@ -24,7 +24,8 @@ r.get('/health', health);
 // ---- everything below requires a valid JWT; req.ownerId is the tenant ----
 r.use(auth);
 r.get('/auth/me', A.me);
-r.put('/profile', uploadAvatar, A.updateProfile);
+r.put('/profile', uploadProfileAvatar, A.updateProfile);
+r.post('/profile/upload-avatar', uploadProfileAvatar, U.avatar);
 r.post('/profile/password', A.changePassword);
 r.get('/dashboard', dashboard);
 r.get('/expenses/monthly-breakdown', X.monthlyBreakdownController);

@@ -8,13 +8,13 @@ let client: SupabaseClient | undefined;
 
 function getStorageClient(): SupabaseClient {
   if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
-    throw new HttpError(503, 'Bill uploads are not configured');
+    throw new HttpError(503, 'Supabase Storage uploads are not configured');
   }
   if (!client) {
     try {
       client = createClient(env.supabaseUrl, env.supabaseServiceRoleKey);
     } catch {
-      throw new HttpError(503, 'Bill upload storage configuration is invalid');
+      throw new HttpError(503, 'Supabase Storage configuration is invalid');
     }
   }
   return client;
@@ -49,6 +49,39 @@ export async function uploadBillFile(
   } catch {
     throw new HttpError(502, 'Bill upload failed; please try again');
   }
+}
+
+export async function uploadProfileAvatar(ownerId: number, file: Express.Multer.File): Promise<string> {
+  const imageType = detectProfileImageType(file.buffer);
+  if (!imageType) {
+    throw new HttpError(400, 'Avatar contents do not match a supported image type');
+  }
+
+  const storage = getStorageClient();
+  const objectPath = `avatars/${ownerId}/profile_photo_${Date.now()}.${imageType.extension}`;
+  try {
+    const { error } = await storage.storage.from('farm-profiles').upload(objectPath, file.buffer, {
+      contentType: imageType.contentType,
+      upsert: false,
+    });
+    if (error) throw error;
+    return storage.storage.from('farm-profiles').getPublicUrl(objectPath).data.publicUrl;
+  } catch {
+    throw new HttpError(502, 'Avatar upload failed; please try again');
+  }
+}
+
+function detectProfileImageType(bytes: Buffer): { contentType: string; extension: string } | null {
+  if (bytes.length >= 3 && bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) {
+    return { contentType: 'image/jpeg', extension: 'jpg' };
+  }
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { contentType: 'image/png', extension: 'png' };
+  }
+  if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') {
+    return { contentType: 'image/webp', extension: 'webp' };
+  }
+  return null;
 }
 
 function assertFileSignature(file: Express.Multer.File): void {

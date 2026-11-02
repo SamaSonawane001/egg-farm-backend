@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { asyncHandler, ok } from '../utils/http';
 import * as svc from '../services/auth.service';
+import { uploadProfileAvatar } from '../services/storage.service';
 
 const mobile = z.string().trim().regex(/^[0-9]{10,13}$/, 'Enter a valid mobile number (10-13 digits, no spaces)');
 const password = z.string().min(6, 'Password must be at least 6 characters').max(100);
@@ -32,7 +33,7 @@ export const updateProfile = asyncHandler(async (req, res) => {
       eggs_per_tray: z.coerce.number().int().positive().max(2147483647).optional(),
     })
     .parse(req.body);
-  const avatar_url = req.file ? `/uploads/${req.file.filename}` : undefined;
+  const avatar_url = req.file ? await uploadProfileAvatar(req.ownerId, req.file) : undefined;
   ok(res, await svc.updateProfile(req.ownerId, { ...b, avatar_url }));
 });
 

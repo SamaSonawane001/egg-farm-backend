@@ -1,4 +1,5 @@
 import { INVOICE_TYPE_LABEL, InvoiceType } from '../models/types';
+import { env } from '../config/env';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const PdfPrinter = require('pdfmake');
@@ -21,27 +22,137 @@ const eggItemDescription = (item: any) => {
 };
 const GREEN = '#047857';
 const GREY = '#78716C';
+const MAX_LOGO_BYTES = 3 * 1024 * 1024;
 
-export function buildInvoicePdf(inv: any, items: any[], farm: any): Promise<Buffer> {
+function resolveFarmLogoUrl(logoUrl: string | null | undefined, ownerId: number): URL | null {
+  if (!logoUrl) return null;
+
+  try {
+    const url = logoUrl.startsWith('/uploads/')
+      ? new URL(logoUrl, env.publicUrl)
+      : new URL(logoUrl);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      return null;
+    }
+
+    if (env.supabaseUrl) {
+      const supabase = new URL(env.supabaseUrl);
+      const avatarPrefix = `${supabase.pathname.replace(/\/$/, '')}/storage/v1/object/public/farm-profiles/avatars/${ownerId}/`;
+      if (
+        url.origin === supabase.origin &&
+        url.pathname.startsWith(avatarPrefix) &&
+        /^profile_photo_\d+\.(?:jpg|png|webp)$/i.test(url.pathname.slice(avatarPrefix.length))
+      ) {
+        return url;
+      }
+    }
+
+    const publicOrigin = new URL(env.publicUrl).origin;
+    if (
+      url.origin === publicOrigin &&
+      /^\/uploads\/[A-Za-z0-9_.-]+\.(?:jpe?g|png)$/i.test(url.pathname)
+    ) {
+      return url;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function loadFarmLogo(logoUrl: string | null | undefined, ownerId: number): Promise<string | null> {
+  const url = resolveFarmLogoUrl(logoUrl, ownerId);
+  if (!url) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(url, { signal: controller.signal, redirect: 'error' });
+    if (!response.ok) return null;
+
+    const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+    if (contentType !== 'image/png' && contentType !== 'image/jpeg') return null;
+    const contentLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > MAX_LOGO_BYTES) return null;
+
+    const reader = response.body?.getReader();
+    if (!reader) return null;
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_LOGO_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(Buffer.from(value));
+    }
+
+    const image = Buffer.concat(chunks, totalBytes);
+    const isPng = contentType === 'image/png'
+      && image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const isJpeg = contentType === 'image/jpeg'
+      && image.length >= 3
+      && image.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
+    if (!isPng && !isJpeg) return null;
+
+    return `data:${contentType};base64,${image.toString('base64')}`;
+  } catch (error) {
+    console.warn('Failed to load farm logo for invoice PDF:', error);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId: number): Promise<Buffer> {
+  const logo = await loadFarmLogo(farm.avatar_url, ownerId);
   const def: any = {
     defaultStyle: { font: 'Helvetica', fontSize: 10, color: '#1C1917' },
     pageSize: 'A4',
     pageMargins: [40, 40, 40, 50],
+    ...(logo ? { images: { farmLogo: logo } } : {}),
     content: [
       {
         columns: [
-          [
-            { text: farm.farm_name, fontSize: 18, bold: true, color: GREEN },
-            { text: farm.owner_name, margin: [0, 2, 0, 0] },
-            { text: `Mobile: ${farm.mobile}`, color: GREY },
-            ...(farm.address ? [{ text: farm.address, color: GREY }] : []),
-          ],
-          [
-            { text: 'INVOICE', fontSize: 22, bold: true, alignment: 'right' },
-            { text: inv.invoice_no, alignment: 'right', color: GREY },
-            { text: `Date: ${inv.invoice_date}`, alignment: 'right', color: GREY },
-            { text: INVOICE_TYPE_LABEL[inv.invoice_type as InvoiceType] || inv.invoice_type, alignment: 'right', bold: true, color: GREEN },
-          ],
+          {
+            width: '*',
+            stack: [
+              { text: farm.farm_name, fontSize: 18, bold: true, color: GREEN },
+              { text: farm.owner_name, margin: [0, 2, 0, 0] },
+              { text: `Mobile: ${farm.mobile}`, color: GREY },
+              ...(farm.address ? [{ text: farm.address, color: GREY }] : []),
+            ],
+          },
+          {
+            width: 70,
+            ...(logo
+              ? {
+                  table: {
+                    widths: ['*'],
+                    body: [[{ image: 'farmLogo', fit: [64, 64], alignment: 'center' }]],
+                  },
+                  layout: {
+                    hLineWidth: () => 0.5,
+                    vLineWidth: () => 0.5,
+                    hLineColor: () => '#E7E5E4',
+                    vLineColor: () => '#E7E5E4',
+                  },
+                }
+              : { text: '' }),
+            alignment: 'center',
+          },
+          {
+            width: '*',
+            stack: [
+              { text: 'INVOICE', fontSize: 22, bold: true, alignment: 'right' },
+              { text: inv.invoice_no, alignment: 'right', color: GREY },
+              { text: `Date: ${inv.invoice_date}`, alignment: 'right', color: GREY },
+              { text: INVOICE_TYPE_LABEL[inv.invoice_type as InvoiceType] || inv.invoice_type, alignment: 'right', bold: true, color: GREEN },
+            ],
+          },
         ],
       },
       { canvas: [{ type: 'line', x1: 0, y1: 8, x2: 515, y2: 8, lineWidth: 1, lineColor: '#E7E5E4' }] },
