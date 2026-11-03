@@ -1,5 +1,5 @@
 export interface User {
-  id: number;
+  id: string;
   mobile: string;
   owner_name: string;
   farm_name: string;

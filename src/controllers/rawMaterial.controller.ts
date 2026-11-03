@@ -16,7 +16,7 @@ const materialBody = z.object({
   min_alert_threshold: z.coerce.number().min(0).refine((n) => Math.abs(n * 1000 - Math.round(n * 1000)) < 1e-8, 'Use at most 3 decimal places').optional().default(0),
 });
 const inwardBody = z.object({
-  material_id: z.coerce.number().int().positive().optional(),
+  material_id: z.string().uuid().optional(),
   material_name: z.string().trim().min(1).max(120).optional(),
   quantity: quantity3,
   unit: z.enum(['kg', 'quintal', 'bags']),
@@ -35,7 +35,7 @@ const inwardBody = z.object({
 });
 const processingBody = z.object({
   date: calendarDate,
-  material_id: z.coerce.number().int().positive(),
+  material_id: z.string().uuid(),
   quantity: quantity3,
   unit: z.enum(['kg', 'quintal', 'bags']),
   remarks: optText,

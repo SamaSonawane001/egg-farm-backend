@@ -1,0 +1,547 @@
+BEGIN;
+-- DESTRUCTIVE: run only when all existing application data may be discarded.
+-- Recreates all project tables using UUID primary keys and UUID foreign keys.
+-- Execute this complete file in the Supabase SQL Editor; it is not an incremental migration.
+DROP TABLE IF EXISTS raw_material_transactions CASCADE;
+DROP TABLE IF EXISTS invoice_items, invoices, egg_production, feed_usage, medicine_logs, medicine_usage_allocations, medicine_usage, medicine_batches, medicines, raw_material_logs, raw_material_processing, raw_materials, feed_purchases, feed_products, mortality_logs, flock_batches, users CASCADE;
+-- Egg Farm Manager schema (idempotent). Every business table carries owner_id -> users(id).
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mobile VARCHAR(15) NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  owner_name VARCHAR(120) NOT NULL,
+  farm_name VARCHAR(160) NOT NULL,
+  avatar_url TEXT,
+  address TEXT,
+  low_stock_threshold NUMERIC(10,2) NOT NULL DEFAULT 10,
+  kg_per_bag NUMERIC(10,2) NOT NULL DEFAULT 50,
+  default_tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
+  eggs_per_tray INT NOT NULL DEFAULT 30 CHECK (eggs_per_tray > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS eggs_per_tray INT NOT NULL DEFAULT 30;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_eggs_per_tray_check') THEN
+    ALTER TABLE users ADD CONSTRAINT users_eggs_per_tray_check CHECK (eggs_per_tray > 0);
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS flock_batches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  batch_name VARCHAR(120) NOT NULL,
+  arrival_date DATE NOT NULL,
+  quantity INT NOT NULL CHECK (quantity > 0),
+  unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
+  total_cost NUMERIC(14,2) GENERATED ALWAYS AS (quantity * unit_price) STORED,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS mortality_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  batch_id UUID NOT NULL REFERENCES flock_batches(id) ON DELETE CASCADE,
+  log_date DATE NOT NULL,
+  dead_count INT NOT NULL CHECK (dead_count > 0),
+  cause TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS feed_products (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name VARCHAR(120) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, name)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_owner_name_ci ON feed_products(owner_id, lower(trim(name)));
+
+CREATE TABLE IF NOT EXISTS feed_purchases (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  delivery_date DATE NOT NULL,
+  feed_type VARCHAR(120) NOT NULL,
+  bags NUMERIC(12,5) NOT NULL CHECK (bags > 0),
+  cost_per_bag NUMERIC(12,2) NOT NULL CHECK (cost_per_bag >= 0),
+  total_cost NUMERIC(14,2) GENERATED ALWAYS AS (bags * cost_per_bag) STORED,
+  source VARCHAR(20) NOT NULL DEFAULT 'PURCHASE' CHECK (source IN ('PURCHASE','PROCESSING')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS source VARCHAR(20) NOT NULL DEFAULT 'PURCHASE';
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'feed_purchases_source_check') THEN
+    ALTER TABLE feed_purchases ADD CONSTRAINT feed_purchases_source_check CHECK (source IN ('PURCHASE','PROCESSING'));
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS raw_materials (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name VARCHAR(120) NOT NULL,
+  unit VARCHAR(30) NOT NULL,
+  min_alert_threshold NUMERIC(12,3) NOT NULL DEFAULT 0 CHECK (min_alert_threshold >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, id)
+);
+
+DO $$ BEGIN
+  IF to_regclass('public.raw_material_transactions') IS NOT NULL
+     AND to_regclass('public.raw_material_logs') IS NULL THEN
+    ALTER TABLE raw_material_transactions RENAME TO raw_material_logs;
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS raw_material_processing (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  processing_date DATE NOT NULL,
+  feed_product_id UUID NOT NULL REFERENCES feed_products(id) ON DELETE RESTRICT,
+  quantity_bags NUMERIC(12,5) NOT NULL CHECK (quantity_bags > 0),
+  remarks TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE raw_material_processing ADD COLUMN IF NOT EXISTS produced_quantity NUMERIC(12,3);
+ALTER TABLE raw_material_processing ADD COLUMN IF NOT EXISTS produced_unit VARCHAR(5);
+UPDATE raw_material_processing
+SET produced_quantity = quantity_bags, produced_unit = 'bags'
+WHERE produced_quantity IS NULL OR produced_unit IS NULL;
+
+CREATE TABLE IF NOT EXISTS raw_material_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  material_id UUID NOT NULL REFERENCES raw_materials(id) ON DELETE RESTRICT,
+  transaction_type VARCHAR(30) NOT NULL CHECK (transaction_type IN ('INWARD','OUTWARD_PROCESSING')),
+  quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
+  unit VARCHAR(30) NOT NULL,
+  transaction_date DATE NOT NULL,
+  supplier VARCHAR(160),
+  rate_per_unit NUMERIC(14,3) CHECK (rate_per_unit IS NULL OR rate_per_unit >= 0),
+  total_amount NUMERIC(14,2) CHECK (total_amount IS NULL OR total_amount >= 0),
+  remarks TEXT,
+  processing_id UUID REFERENCES raw_material_processing(id) ON DELETE CASCADE,
+  bill_image_url TEXT,
+  bill_number VARCHAR(100),
+  vendor_name VARCHAR(150),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_image_url TEXT;
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_number VARCHAR(100);
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(150);
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS entered_quantity NUMERIC(12,3);
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS entered_unit VARCHAR(30);
+
+UPDATE raw_material_logs
+SET entered_quantity = quantity, entered_unit = unit
+WHERE entered_quantity IS NULL OR entered_unit IS NULL;
+
+UPDATE raw_material_logs l
+SET quantity = ROUND(
+      l.quantity * CASE l.unit
+        WHEN 'quintal' THEN 100
+        WHEN 'bags' THEN COALESCE(NULLIF(u.kg_per_bag, 0), 50)
+        ELSE 1
+      END,
+      3
+    ),
+    unit = 'kg'
+FROM raw_materials m
+JOIN users u ON u.id = m.owner_id
+WHERE l.material_id = m.id AND l.owner_id = m.owner_id AND l.unit <> 'kg';
+
+UPDATE raw_materials m
+SET min_alert_threshold = ROUND(
+      m.min_alert_threshold * CASE m.unit
+        WHEN 'quintal' THEN 100
+        WHEN 'bags' THEN COALESCE(NULLIF(u.kg_per_bag, 0), 50)
+        ELSE 1
+      END,
+      3
+    ),
+    unit = 'kg'
+FROM users u
+WHERE u.id = m.owner_id AND m.unit <> 'kg';
+
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM raw_materials
+    GROUP BY owner_id, lower(trim(name))
+    HAVING COUNT(*) > 1 AND COUNT(DISTINCT unit) > 1
+  ) THEN
+    RAISE EXCEPTION 'Cannot merge duplicate raw materials with different units; resolve those records before migrating';
+  END IF;
+  WITH ranked AS (
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
+    FROM raw_materials
+  )
+  UPDATE raw_material_logs l
+  SET material_id = ranked.keep_id
+  FROM ranked
+  WHERE l.material_id = ranked.id AND ranked.id <> ranked.keep_id;
+  WITH ranked AS (
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
+    FROM raw_materials
+  )
+  DELETE FROM raw_materials m
+  USING ranked
+  WHERE m.id = ranked.id AND ranked.id <> ranked.keep_id;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_owner_name_ci
+  ON raw_materials(owner_id, lower(trim(name)));
+
+CREATE TABLE IF NOT EXISTS medicines (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name VARCHAR(120) NOT NULL,
+  category VARCHAR(20) NOT NULL CHECK (category IN ('Antibiotic','Vitamin','Vaccine','Sanitizer')),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
+  min_alert_level NUMERIC(12,3) NOT NULL DEFAULT 0 CHECK (min_alert_level >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS medicine_batches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id UUID NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  batch_number VARCHAR(120) NOT NULL,
+  expiry_date DATE NOT NULL,
+  received_quantity NUMERIC(12,3) NOT NULL CHECK (received_quantity > 0),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
+  total_cost NUMERIC(14,2) NOT NULL CHECK (total_cost >= 0),
+  received_date DATE NOT NULL,
+  remarks TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS medicine_usage (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id UUID NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  usage_date DATE NOT NULL,
+  quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
+  flock_id UUID NOT NULL REFERENCES flock_batches(id) ON DELETE RESTRICT,
+  admin_route VARCHAR(20) NOT NULL CHECK (admin_route IN ('Water','Feed','Spray','Injection')),
+  remarks TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS medicine_usage_allocations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  usage_id UUID NOT NULL REFERENCES medicine_usage(id) ON DELETE CASCADE,
+  batch_id UUID NOT NULL REFERENCES medicine_batches(id) ON DELETE RESTRICT,
+  quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0)
+);
+
+CREATE TABLE IF NOT EXISTS medicine_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id UUID NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  event_type VARCHAR(10) NOT NULL CHECK (event_type IN ('INWARD','USED')),
+  quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
+  flock_id UUID REFERENCES flock_batches(id) ON DELETE RESTRICT,
+  admin_route VARCHAR(20) CHECK (admin_route IS NULL OR admin_route IN ('Water','Feed','Spray','Injection')),
+  log_date DATE NOT NULL,
+  remarks TEXT,
+  batch_id UUID REFERENCES medicine_batches(id) ON DELETE RESTRICT,
+  usage_id UUID REFERENCES medicine_usage(id) ON DELETE CASCADE,
+  bill_image_url TEXT,
+  bill_number VARCHAR(100),
+  vendor_name VARCHAR(150),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (
+    (event_type='INWARD' AND batch_id IS NOT NULL AND usage_id IS NULL AND flock_id IS NULL AND admin_route IS NULL)
+    OR
+    (event_type='USED' AND usage_id IS NOT NULL AND batch_id IS NULL AND flock_id IS NOT NULL AND admin_route IS NOT NULL)
+  )
+);
+
+ALTER TABLE medicine_logs ADD COLUMN IF NOT EXISTS bill_image_url TEXT;
+ALTER TABLE medicine_logs ADD COLUMN IF NOT EXISTS bill_number VARCHAR(100);
+ALTER TABLE medicine_logs ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(150);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medicine_logs_batch
+  ON medicine_logs(owner_id,batch_id) WHERE batch_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medicine_logs_usage
+  ON medicine_logs(owner_id,usage_id) WHERE usage_id IS NOT NULL;
+
+INSERT INTO medicine_logs
+  (owner_id,medicine_id,event_type,quantity,unit,log_date,remarks,batch_id,created_at)
+SELECT b.owner_id,b.medicine_id,'INWARD',b.received_quantity,b.unit,b.received_date,b.remarks,b.id,b.created_at
+FROM medicine_batches b
+ON CONFLICT DO NOTHING;
+
+INSERT INTO medicine_logs
+  (owner_id,medicine_id,event_type,quantity,unit,flock_id,admin_route,log_date,remarks,usage_id,created_at)
+SELECT u.owner_id,u.medicine_id,'USED',u.quantity,u.unit,u.flock_id,u.admin_route,u.usage_date,u.remarks,u.id,u.created_at
+FROM medicine_usage u
+ON CONFLICT DO NOTHING;
+
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM medicines
+    GROUP BY owner_id, lower(trim(name))
+    HAVING COUNT(*) > 1 AND (COUNT(DISTINCT unit) > 1 OR COUNT(DISTINCT category) > 1)
+  ) THEN
+    RAISE EXCEPTION 'Cannot merge duplicate medicines with different categories or units; resolve those records before migrating';
+  END IF;
+  WITH ranked AS (
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
+    FROM medicines
+  )
+  UPDATE medicine_batches b
+  SET medicine_id = ranked.keep_id
+  FROM ranked
+  WHERE b.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
+  WITH ranked AS (
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
+    FROM medicines
+  )
+  UPDATE medicine_usage u
+  SET medicine_id = ranked.keep_id
+  FROM ranked
+  WHERE u.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
+  WITH ranked AS (
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
+    FROM medicines
+  )
+  UPDATE medicine_logs l
+  SET medicine_id = ranked.keep_id
+  FROM ranked
+  WHERE l.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
+  WITH ranked AS (
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
+    FROM medicines
+  )
+  DELETE FROM medicines m
+  USING ranked
+  WHERE m.id = ranked.id AND ranked.id <> ranked.keep_id;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_owner_name_ci
+  ON medicines(owner_id, lower(trim(name)));
+
+CREATE TABLE IF NOT EXISTS feed_usage (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  batch_id UUID REFERENCES flock_batches(id) ON DELETE SET NULL,
+  usage_date DATE NOT NULL,
+  quantity NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
+  unit VARCHAR(5) NOT NULL CHECK (unit IN ('bags','kg')),
+  bags_equivalent NUMERIC(12,3) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS feed_type VARCHAR(120);
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS feed_product_id UUID REFERENCES feed_products(id) ON DELETE CASCADE;
+ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS feed_product_id UUID REFERENCES feed_products(id) ON DELETE CASCADE;
+
+-- Existing usage logs cannot be attributed across multiple feed types reliably.
+-- Backfill only where the owner's purchase history contains exactly one type.
+UPDATE feed_usage u
+SET feed_type = only_feed.feed_type
+FROM (
+  SELECT owner_id, MIN(feed_type) AS feed_type
+  FROM feed_purchases
+  GROUP BY owner_id
+  HAVING COUNT(DISTINCT lower(trim(feed_type))) = 1
+) only_feed
+WHERE u.owner_id = only_feed.owner_id AND u.feed_type IS NULL;
+
+INSERT INTO feed_products (owner_id, name)
+SELECT names.owner_id, MIN(names.name)
+FROM (
+  SELECT owner_id, trim(feed_type) AS name FROM feed_purchases WHERE trim(feed_type) <> ''
+  UNION ALL
+  SELECT owner_id, trim(feed_type) AS name FROM feed_usage WHERE feed_type IS NOT NULL AND trim(feed_type) <> ''
+) names
+GROUP BY names.owner_id, lower(names.name)
+ON CONFLICT DO NOTHING;
+
+UPDATE feed_purchases p SET feed_product_id = fp.id
+FROM feed_products fp
+WHERE p.owner_id = fp.owner_id AND lower(trim(p.feed_type)) = lower(trim(fp.name)) AND p.feed_product_id IS NULL;
+
+UPDATE feed_usage u SET feed_product_id = fp.id
+FROM feed_products fp
+WHERE u.owner_id = fp.owner_id AND u.feed_type IS NOT NULL
+  AND lower(trim(u.feed_type)) = lower(trim(fp.name)) AND u.feed_product_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS egg_production (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  batch_id UUID REFERENCES flock_batches(id) ON DELETE SET NULL,
+  collection_date DATE NOT NULL,
+  trays_count INT NOT NULL DEFAULT 0 CHECK (trays_count >= 0),
+  loose_eggs INT NOT NULL DEFAULT 0 CHECK (loose_eggs >= 0),
+  eggs_per_tray_used INT NOT NULL DEFAULT 30 CHECK (eggs_per_tray_used > 0),
+  total_eggs INT NOT NULL CHECK (total_eggs >= 0),
+  damaged_eggs INT NOT NULL DEFAULT 0 CHECK (damaged_eggs >= 0),
+  net_eggs INT GENERATED ALWAYS AS (total_eggs - damaged_eggs) STORED,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (damaged_eggs <= total_eggs)
+);
+
+ALTER TABLE egg_production ADD COLUMN IF NOT EXISTS trays_count INT;
+ALTER TABLE egg_production ADD COLUMN IF NOT EXISTS loose_eggs INT;
+ALTER TABLE egg_production ADD COLUMN IF NOT EXISTS eggs_per_tray_used INT;
+UPDATE egg_production
+SET trays_count = COALESCE(trays_count, 0),
+    loose_eggs = COALESCE(loose_eggs, total_eggs),
+    eggs_per_tray_used = COALESCE(eggs_per_tray_used, (
+      SELECT u.eggs_per_tray FROM users u WHERE u.id = egg_production.owner_id
+    ), 30);
+ALTER TABLE egg_production ALTER COLUMN trays_count SET DEFAULT 0;
+ALTER TABLE egg_production ALTER COLUMN trays_count SET NOT NULL;
+ALTER TABLE egg_production ALTER COLUMN loose_eggs SET DEFAULT 0;
+ALTER TABLE egg_production ALTER COLUMN loose_eggs SET NOT NULL;
+ALTER TABLE egg_production ALTER COLUMN eggs_per_tray_used SET DEFAULT 30;
+ALTER TABLE egg_production ALTER COLUMN eggs_per_tray_used SET NOT NULL;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'egg_production_trays_count_check') THEN
+    ALTER TABLE egg_production ADD CONSTRAINT egg_production_trays_count_check CHECK (trays_count >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'egg_production_loose_eggs_check') THEN
+    ALTER TABLE egg_production ADD CONSTRAINT egg_production_loose_eggs_check CHECK (loose_eggs >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'egg_production_eggs_per_tray_used_check') THEN
+    ALTER TABLE egg_production ADD CONSTRAINT egg_production_eggs_per_tray_used_check CHECK (eggs_per_tray_used > 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'egg_production_total_matches_trays_check') THEN
+    ALTER TABLE egg_production ADD CONSTRAINT egg_production_total_matches_trays_check
+      CHECK (total_eggs = trays_count * eggs_per_tray_used + loose_eggs);
+  END IF;
+END $$;
+
+ALTER TABLE egg_production DROP COLUMN IF EXISTS price_mode;
+ALTER TABLE egg_production DROP COLUMN IF EXISTS price_input;
+ALTER TABLE egg_production DROP COLUMN IF EXISTS price_per_egg;
+ALTER TABLE egg_production DROP COLUMN IF EXISTS total_value;
+
+CREATE TABLE IF NOT EXISTS invoices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  invoice_year INT NOT NULL DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)::int,
+  invoice_seq INT NOT NULL,
+  invoice_no VARCHAR(30) NOT NULL,
+  invoice_type VARCHAR(20) NOT NULL CHECK (invoice_type IN ('egg_sale','spent_hen_sale','feed_trade')),
+  customer_name VARCHAR(160) NOT NULL,
+  customer_mobile VARCHAR(20),
+  invoice_date DATE NOT NULL,
+  subtotal NUMERIC(14,2) NOT NULL,
+  tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
+  tax_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+  grand_total NUMERIC(14,2) NOT NULL,
+  notes TEXT,
+  share_token UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (owner_id, invoice_year, invoice_seq)
+);
+
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_year INT;
+UPDATE invoices
+SET invoice_year = COALESCE(NULLIF(substring(invoice_no from '^INV-([0-9]{4})-'), '')::int, EXTRACT(YEAR FROM created_at)::int)
+WHERE invoice_year IS NULL;
+ALTER TABLE invoices ALTER COLUMN invoice_year SET NOT NULL;
+ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_owner_id_invoice_seq_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_year_seq ON invoices(owner_id, invoice_year, invoice_seq);
+
+CREATE TABLE IF NOT EXISTS invoice_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  description VARCHAR(255) NOT NULL,
+  quantity NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
+  unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
+  amount NUMERIC(14,2) NOT NULL,
+  egg_quantity INT CHECK (egg_quantity IS NULL OR egg_quantity > 0)
+);
+
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_quantity INT;
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_unit VARCHAR(10);
+UPDATE invoice_items it
+SET egg_quantity = CASE
+  WHEN lower(it.description) ~ '(crate|tray)' THEN round(it.quantity * 30)::int
+  ELSE round(it.quantity)::int
+END
+FROM invoices i
+WHERE i.id = it.invoice_id AND i.owner_id = it.owner_id AND i.invoice_type = 'egg_sale'
+  AND it.egg_quantity IS NULL;
+
+UPDATE invoice_items it
+SET egg_unit = CASE
+  WHEN it.egg_quantity = round(it.quantity * 30)::int AND lower(it.description) ~ 'tray' THEN 'tray'
+  WHEN it.egg_quantity = round(it.quantity * 30)::int THEN 'crate'
+  WHEN it.egg_quantity = round(it.quantity)::int THEN 'eggs'
+  ELSE NULL
+END
+FROM invoices i
+WHERE i.id = it.invoice_id AND i.owner_id = it.owner_id AND i.invoice_type = 'egg_sale'
+  AND it.egg_unit IS NULL;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoice_items_egg_unit_check') THEN
+    ALTER TABLE invoice_items ADD CONSTRAINT invoice_items_egg_unit_check
+      CHECK (egg_unit IS NULL OR egg_unit IN ('eggs','crate','tray'));
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_flock_owner ON flock_batches(owner_id, arrival_date DESC);
+CREATE INDEX IF NOT EXISTS idx_mort_owner ON mortality_logs(owner_id, log_date DESC);
+CREATE INDEX IF NOT EXISTS idx_mort_batch ON mortality_logs(batch_id);
+CREATE INDEX IF NOT EXISTS idx_feedp_owner ON feed_purchases(owner_id, delivery_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feedp_product ON feed_purchases(owner_id, feed_product_id, delivery_date DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_processing_feed_product ON raw_material_processing(feed_product_id);
+DROP INDEX IF EXISTS idx_raw_material_tx_owner_date;
+DROP INDEX IF EXISTS idx_raw_material_tx_material;
+CREATE INDEX IF NOT EXISTS idx_raw_material_logs_owner_date ON raw_material_logs(owner_id, transaction_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_material_logs_material ON raw_material_logs(owner_id, material_id, transaction_date DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_material_logs_processing ON raw_material_logs(processing_id);
+CREATE INDEX IF NOT EXISTS idx_raw_material_processing_owner_date ON raw_material_processing(owner_id, processing_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_batches_owner_item_expiry ON medicine_batches(owner_id, medicine_id, expiry_date);
+CREATE INDEX IF NOT EXISTS idx_medicine_usage_owner_date ON medicine_usage(owner_id, usage_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_usage_flock ON medicine_usage(flock_id);
+CREATE INDEX IF NOT EXISTS idx_medicine_usage_alloc_batch ON medicine_usage_allocations(owner_id, batch_id);
+CREATE INDEX IF NOT EXISTS idx_medicine_usage_alloc_usage ON medicine_usage_allocations(usage_id);
+CREATE INDEX IF NOT EXISTS idx_medicine_logs_owner_date ON medicine_logs(owner_id, log_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_logs_item ON medicine_logs(owner_id, medicine_id, log_date DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_logs_flock ON medicine_logs(flock_id);
+CREATE INDEX IF NOT EXISTS idx_feedu_owner ON feed_usage(owner_id, usage_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feedu_owner_type ON feed_usage(owner_id, lower(trim(feed_type)));
+CREATE INDEX IF NOT EXISTS idx_feedu_product ON feed_usage(owner_id, feed_product_id, usage_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feedu_batch ON feed_usage(batch_id);
+CREATE INDEX IF NOT EXISTS idx_egg_owner ON egg_production(owner_id, collection_date DESC);
+CREATE INDEX IF NOT EXISTS idx_egg_batch ON egg_production(batch_id);
+CREATE INDEX IF NOT EXISTS idx_inv_owner ON invoices(owner_id, invoice_date DESC);
+CREATE INDEX IF NOT EXISTS idx_inv_created_owner ON invoices(owner_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_invitems_inv ON invoice_items(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_invitems_owner_invoice ON invoice_items(owner_id, invoice_id);
+
+-- Row-Level-Security ready: policies key off the session setting app.owner_id.
+-- The API connects as the table owner (bypasses RLS) and filters by owner_id in every query.
+-- To enforce RLS in the DB too, connect as a non-owner role and run
+--   SELECT set_config('app.owner_id', '<id>', true);  at the start of each transaction.
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage','egg_production','invoices','invoice_items','raw_materials','raw_material_processing','raw_material_logs','medicines','medicine_batches','medicine_usage','medicine_usage_allocations','medicine_logs']
+  LOOP
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);
+    EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (owner_id = NULLIF(current_setting(''app.owner_id'', true), '''')::UUID)', t);
+  END LOOP;
+END $$;
+
+COMMIT;

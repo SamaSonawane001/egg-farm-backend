@@ -10,7 +10,7 @@ function validate(d: { trays_count: number; loose_eggs: number; damaged_eggs: nu
   return totalEggs;
 }
 
-async function stock(client: PoolClient | null, ownerId: number) {
+async function stock(client: PoolClient | null, ownerId: string) {
   const run = (text: string, params: any[]) => client ? client.query(text, params).then((r) => r.rows) : query(text, params);
   const rows = await run(
     `SELECT COALESCE((SELECT SUM(net_eggs) FROM egg_production WHERE owner_id=$1),0) AS produced,
@@ -30,9 +30,9 @@ async function stock(client: PoolClient | null, ownerId: number) {
   };
 }
 
-export const availableStock = (ownerId: number) => stock(null, ownerId);
+export const availableStock = (ownerId: string) => stock(null, ownerId);
 
-export const list = (ownerId: number, filter: { date?: string; month?: string } = {}) =>
+export const list = (ownerId: string, filter: { date?: string; month?: string } = {}) =>
   query(
     `SELECT e.*, b.batch_name FROM egg_production e LEFT JOIN flock_batches b ON b.id=e.batch_id
      WHERE e.owner_id=$1
@@ -45,7 +45,7 @@ export const list = (ownerId: number, filter: { date?: string; month?: string } 
     [ownerId, filter.date ?? null, filter.month ? `${filter.month}-01` : null]
   );
 
-export async function summary(ownerId: number, today: string) {
+export async function summary(ownerId: string, today: string) {
   const r = await query(
     `SELECT
        COALESCE(SUM(net_eggs) FILTER (WHERE collection_date=$2::date),0) AS today_net,
@@ -62,7 +62,7 @@ export async function summary(ownerId: number, today: string) {
   return { ...r[0], ...inventory };
 }
 
-export async function monthlySummary(ownerId: number, month: string) {
+export async function monthlySummary(ownerId: string, month: string) {
   const start = `${month}-01`;
   const rows = await query(
     `SELECT COALESCE(SUM(trays_count),0) AS trays_count,
@@ -77,7 +77,7 @@ export async function monthlySummary(ownerId: number, month: string) {
   return { month, ...rows[0] };
 }
 
-export async function monthlySummaries(ownerId: number) {
+export async function monthlySummaries(ownerId: string) {
   return query(
     `SELECT to_char(date_trunc('month', collection_date), 'YYYY-MM') AS month,
             COALESCE(SUM(trays_count),0) AS trays_count,
@@ -92,10 +92,10 @@ export async function monthlySummaries(ownerId: number) {
   );
 }
 
-export async function create(ownerId: number, d: { collection_date: string; batch_id: number | null; trays_count: number; loose_eggs: number; damaged_eggs: number }) {
+export async function create(ownerId: string, d: { collection_date: string; batch_id: string | null; trays_count: number; loose_eggs: number; damaged_eggs: number }) {
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
     const settings = await client.query('SELECT eggs_per_tray FROM users WHERE id=$1', [ownerId]);
     if (!settings.rows.length) throw new HttpError(404, 'Farm profile not found');
     const eggsPerTray = Number(settings.rows[0].eggs_per_tray);
@@ -110,10 +110,10 @@ export async function create(ownerId: number, d: { collection_date: string; batc
   });
 }
 
-export async function update(ownerId: number, id: number, d: { collection_date: string; batch_id: number | null; trays_count: number; loose_eggs: number; damaged_eggs: number }) {
+export async function update(ownerId: string, id: string, d: { collection_date: string; batch_id: string | null; trays_count: number; loose_eggs: number; damaged_eggs: number }) {
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
     const existing = await client.query('SELECT net_eggs, eggs_per_tray_used FROM egg_production WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
     if (!existing.rows.length) throw new HttpError(404, 'Egg production record not found');
     const eggsPerTray = Number(existing.rows[0].eggs_per_tray_used);
@@ -132,9 +132,9 @@ export async function update(ownerId: number, id: number, d: { collection_date: 
   });
 }
 
-export async function remove(ownerId: number, id: number) {
+export async function remove(ownerId: string, id: string) {
   await withTx(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
     const existing = await client.query('SELECT net_eggs FROM egg_production WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
     if (!existing.rows.length) throw new HttpError(404, 'Egg production record not found');
     const currentStock = await stock(client, ownerId);

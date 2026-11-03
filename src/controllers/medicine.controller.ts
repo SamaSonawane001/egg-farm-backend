@@ -18,7 +18,7 @@ const medicineBody = z.object({
   min_alert_level: z.coerce.number().min(0).refine((n) => Math.abs(n * 1000 - Math.round(n * 1000)) < 1e-8, 'Use at most 3 decimal places'),
 });
 const inwardBody = z.object({
-  medicine_id: z.coerce.number().int().positive().optional(),
+  medicine_id: z.string().uuid().optional(),
   medicine_name: z.string().trim().min(1).max(120).optional(),
   category: z.enum(['Antibiotic', 'Vitamin', 'Vaccine', 'Sanitizer']).optional(),
   quantity: quantity3,
@@ -40,10 +40,10 @@ const inwardBody = z.object({
   }
 });
 const usageBody = z.object({
-  medicine_id: z.coerce.number().int().positive(),
+  medicine_id: z.string().uuid(),
   quantity: quantity3,
   unit: z.enum(units),
-  flock_id: z.coerce.number().int().positive(),
+  flock_id: z.string().uuid(),
   admin_route: z.enum(['Water', 'Feed', 'Spray', 'Injection']),
   date: calendarDate,
   remarks: optText,

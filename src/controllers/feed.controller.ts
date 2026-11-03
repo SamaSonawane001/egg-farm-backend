@@ -5,14 +5,14 @@ import * as svc from '../services/feed.service';
 
 const purchaseBody = z.object({
   delivery_date: dateStr,
-  feed_product_id: z.coerce.number().int().positive(),
+  feed_product_id: z.string().uuid(),
   bags: z.coerce.number().positive(),
   cost_per_bag: z.coerce.number().min(0),
 });
 const usageBody = z.object({
   usage_date: dateStr,
   batch_id: optId,
-  feed_product_id: z.coerce.number().int().positive(),
+  feed_product_id: z.string().uuid(),
   quantity: z.coerce.number().positive(),
   unit: z.enum(['bags', 'kg']),
 });

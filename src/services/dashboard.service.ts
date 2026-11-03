@@ -2,7 +2,7 @@ import { query } from '../config/db';
 import { getStock } from './feed.service';
 import { availableStock } from './egg.service';
 
-export async function getDashboard(ownerId: number, today: string) {
+export async function getDashboard(ownerId: string, today: string) {
   const [overview, stock, eggStock] = await Promise.all([
     query(
       `WITH period AS (

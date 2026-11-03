@@ -2,10 +2,10 @@ import { PoolClient } from 'pg';
 import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
 
-const lockOwner = (client: PoolClient, ownerId: number) =>
-  client.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
+const lockOwner = (client: PoolClient, ownerId: string) =>
+  client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
 
-export async function listMedicines(ownerId: number) {
+export async function listMedicines(ownerId: string) {
   return query(
     `WITH batch_stock AS (
        SELECT b.id,b.owner_id,b.medicine_id,b.expiry_date,b.received_quantity,
@@ -36,8 +36,8 @@ export async function listMedicines(ownerId: number) {
 }
 
 export async function getMedicineDetails(
-  ownerId: number,
-  id: number,
+  ownerId: string,
+  id: string,
   monthStart: string,
 ) {
   const [medicineRows, purchases, usage] = await Promise.all([
@@ -112,7 +112,7 @@ export async function getMedicineDetails(
   return { medicine: medicineRows[0], purchases, usage };
 }
 
-export async function createMedicine(ownerId: number, d: any) {
+export async function createMedicine(ownerId: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const existing = await client.query(
@@ -162,7 +162,7 @@ export async function createMedicine(ownerId: number, d: any) {
   });
 }
 
-export async function updateMedicine(ownerId: number, id: number, d: any) {
+export async function updateMedicine(ownerId: string, id: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const existing = await client.query('SELECT unit FROM medicines WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
@@ -180,12 +180,12 @@ export async function updateMedicine(ownerId: number, id: number, d: any) {
   });
 }
 
-export async function deleteMedicine(ownerId: number, id: number) {
+export async function deleteMedicine(ownerId: string, id: string) {
   const rows = await query('DELETE FROM medicines WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);
   if (!rows.length) throw new HttpError(404, 'Medicine not found');
 }
 
-export async function receiveMedicine(ownerId: number, d: any) {
+export async function receiveMedicine(ownerId: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     let medicine = d.medicine_id
@@ -228,9 +228,9 @@ export async function receiveMedicine(ownerId: number, d: any) {
 }
 
 export async function updateMedicineBatch(
-  ownerId: number,
-  medicineId: number,
-  batchId: number,
+  ownerId: string,
+  medicineId: string,
+  batchId: string,
   d: any,
 ) {
   return withTx(async (client) => {
@@ -296,9 +296,9 @@ export async function updateMedicineBatch(
 }
 
 export async function deleteMedicineBatch(
-  ownerId: number,
-  medicineId: number,
-  batchId: number,
+  ownerId: string,
+  medicineId: string,
+  batchId: string,
 ) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
@@ -328,7 +328,7 @@ export async function deleteMedicineBatch(
   });
 }
 
-export async function createUsage(ownerId: number, d: any) {
+export async function createUsage(ownerId: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const medicine = await client.query('SELECT id,unit FROM medicines WHERE id=$1 AND owner_id=$2 FOR UPDATE', [d.medicine_id, ownerId]);
@@ -377,7 +377,7 @@ export async function createUsage(ownerId: number, d: any) {
   });
 }
 
-export async function listUsage(ownerId: number, from?: string, to?: string) {
+export async function listUsage(ownerId: string, from?: string, to?: string) {
   const rows = await query(
     `SELECT u.*,m.name AS medicine_name,f.batch_name AS flock_name
      FROM medicine_usage u
@@ -393,7 +393,7 @@ export async function listUsage(ownerId: number, from?: string, to?: string) {
     `SELECT a.usage_id,a.batch_id,b.batch_number,b.expiry_date,a.quantity
      FROM medicine_usage_allocations a
      JOIN medicine_batches b ON b.id=a.batch_id AND b.owner_id=a.owner_id
-     WHERE a.owner_id=$1 AND a.usage_id=ANY($2::bigint[]) ORDER BY a.id`,
+     WHERE a.owner_id=$1 AND a.usage_id=ANY($2::uuid[]) ORDER BY a.id`,
     [ownerId, rows.map((row: any) => row.id)]
   );
   return rows.map((row: any) => ({
@@ -403,7 +403,7 @@ export async function listUsage(ownerId: number, from?: string, to?: string) {
   }));
 }
 
-export async function listLogs(ownerId: number, from?: string, to?: string) {
+export async function listLogs(ownerId: string, from?: string, to?: string) {
   return query(
     `SELECT l.*,l.event_type AS transaction_type,l.log_date AS transaction_date,
             m.name AS medicine_name,m.category AS medicine_category,

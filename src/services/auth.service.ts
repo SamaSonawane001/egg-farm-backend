@@ -8,7 +8,7 @@ import { User } from '../models/types';
 export const USER_COLS =
   'id, mobile, owner_name, farm_name, avatar_url, address, low_stock_threshold, kg_per_bag, default_tax_percent, eggs_per_tray';
 
-const sign = (ownerId: number) => jwt.sign({ ownerId }, env.jwtSecret, { expiresIn: env.jwtExpires as any });
+const sign = (ownerId: string) => jwt.sign({ ownerId }, env.jwtSecret, { expiresIn: env.jwtExpires as any });
 
 export async function register(i: { mobile: string; password: string; owner_name: string; farm_name: string; avatar_url: string | null }) {
   const exists = await query('SELECT 1 FROM users WHERE mobile=$1', [i.mobile]);
@@ -31,14 +31,14 @@ export async function login(mobile: string, password: string) {
   return { token: sign(user.id), user: pick };
 }
 
-export async function getUser(ownerId: number): Promise<User> {
+export async function getUser(ownerId: string): Promise<User> {
   const rows = await query<User>(`SELECT ${USER_COLS} FROM users WHERE id=$1`, [ownerId]);
   if (!rows.length) throw new HttpError(401, 'Account not found');
   return rows[0];
 }
 
 export async function updateProfile(
-  ownerId: number,
+  ownerId: string,
   i: { owner_name?: string; farm_name?: string; address?: string; low_stock_threshold?: number; kg_per_bag?: number; default_tax_percent?: number; eggs_per_tray?: number; avatar_url?: string }
 ) {
   const rows = await query<User>(
@@ -54,7 +54,7 @@ export async function updateProfile(
   return rows[0];
 }
 
-export async function changePassword(ownerId: number, current: string, next: string) {
+export async function changePassword(ownerId: string, current: string, next: string) {
   const rows = await query<{ password_hash: string }>('SELECT password_hash FROM users WHERE id=$1', [ownerId]);
   if (!rows.length || !(await bcrypt.compare(current, rows[0].password_hash))) throw new HttpError(400, 'Current password is incorrect');
   await query('UPDATE users SET password_hash=$2 WHERE id=$1', [ownerId, await bcrypt.hash(next, 10)]);

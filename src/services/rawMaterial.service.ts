@@ -2,10 +2,10 @@ import { PoolClient } from 'pg';
 import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
 
-const lockOwner = (client: PoolClient, ownerId: number) =>
-  client.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
+const lockOwner = (client: PoolClient, ownerId: string) =>
+  client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
 
-export async function listMaterials(ownerId: number) {
+export async function listMaterials(ownerId: string) {
   return query(
     `SELECT m.id, m.name, m.unit, m.min_alert_threshold,
             COALESCE(SUM(t.quantity) FILTER (WHERE t.transaction_type='INWARD'),0) AS total_purchased,
@@ -20,7 +20,7 @@ export async function listMaterials(ownerId: number) {
   );
 }
 
-export async function getMaterialDetails(ownerId: number, id: number, month: string) {
+export async function getMaterialDetails(ownerId: string, id: string, month: string) {
   const [materialRows, transactions] = await Promise.all([
     query(
       `SELECT m.id, m.name, m.unit, m.min_alert_threshold,
@@ -72,7 +72,7 @@ export async function getMaterialDetails(ownerId: number, id: number, month: str
   return { material: materialRows[0], transactions };
 }
 
-export async function createMaterial(ownerId: number, d: any) {
+export async function createMaterial(ownerId: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const existing = await client.query(
@@ -103,7 +103,7 @@ export async function createMaterial(ownerId: number, d: any) {
   });
 }
 
-export async function updateMaterial(ownerId: number, id: number, d: any) {
+export async function updateMaterial(ownerId: string, id: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const existing = await client.query('SELECT id FROM raw_materials WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
@@ -117,12 +117,12 @@ export async function updateMaterial(ownerId: number, id: number, d: any) {
   });
 }
 
-export async function deleteMaterial(ownerId: number, id: number) {
+export async function deleteMaterial(ownerId: string, id: string) {
   const rows = await query('DELETE FROM raw_materials WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);
   if (!rows.length) throw new HttpError(404, 'Raw material not found');
 }
 
-export async function listLogs(ownerId: number, from?: string, to?: string) {
+export async function listLogs(ownerId: string, from?: string, to?: string) {
   return query(
     `SELECT t.*, m.name AS material_name
      FROM raw_material_logs t
@@ -134,7 +134,7 @@ export async function listLogs(ownerId: number, from?: string, to?: string) {
   );
 }
 
-export async function receiveMaterial(ownerId: number, d: any) {
+export async function receiveMaterial(ownerId: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const settings = await client.query(
@@ -179,7 +179,7 @@ export async function receiveMaterial(ownerId: number, d: any) {
   });
 }
 
-export async function listProcessing(ownerId: number) {
+export async function listProcessing(ownerId: string) {
   const operations = await query(
     `SELECT p.*, f.name AS feed_product_name
      FROM raw_material_processing p
@@ -193,7 +193,7 @@ export async function listProcessing(ownerId: number) {
      FROM raw_material_logs t
      JOIN raw_materials m ON m.id=t.material_id AND m.owner_id=t.owner_id
      WHERE t.owner_id=$1 AND t.transaction_type='OUTWARD_PROCESSING'
-       AND t.processing_id=ANY($2::bigint[])
+       AND t.processing_id=ANY($2::uuid[])
      ORDER BY t.id`,
     [ownerId, operations.map((p: any) => p.id)]
   );
@@ -207,7 +207,7 @@ export async function listProcessing(ownerId: number) {
   }));
 }
 
-export async function processMaterials(ownerId: number, d: any) {
+export async function processMaterials(ownerId: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const materialResult = await client.query(

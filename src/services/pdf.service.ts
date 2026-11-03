@@ -24,7 +24,7 @@ const GREEN = '#047857';
 const GREY = '#78716C';
 const MAX_LOGO_BYTES = 3 * 1024 * 1024;
 
-function resolveFarmLogoUrl(logoUrl: string | null | undefined, ownerId: number): URL | null {
+function resolveFarmLogoUrl(logoUrl: string | null | undefined, ownerId: string): URL | null {
   if (!logoUrl) return null;
 
   try {
@@ -63,7 +63,7 @@ function resolveFarmLogoUrl(logoUrl: string | null | undefined, ownerId: number)
   return null;
 }
 
-async function loadFarmLogo(logoUrl: string | null | undefined, ownerId: number): Promise<string | null> {
+async function loadFarmLogo(logoUrl: string | null | undefined, ownerId: string): Promise<string | null> {
   const url = resolveFarmLogoUrl(logoUrl, ownerId);
   if (!url) return null;
 
@@ -110,7 +110,7 @@ async function loadFarmLogo(logoUrl: string | null | undefined, ownerId: number)
   }
 }
 
-export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId: number): Promise<Buffer> {
+export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId: string): Promise<Buffer> {
   const logo = await loadFarmLogo(farm.avatar_url, ownerId);
   const def: any = {
     defaultStyle: { font: 'Helvetica', fontSize: 10, color: '#1C1917' },

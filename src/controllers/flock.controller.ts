@@ -10,7 +10,7 @@ const batchBody = z.object({
   notes: optText,
 });
 const mortalityBody = z.object({
-  batch_id: z.coerce.number().int().positive(),
+  batch_id: z.string().uuid(),
   log_date: dateStr,
   dead_count: z.coerce.number().int().positive(),
   cause: optText,

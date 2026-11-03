@@ -3,7 +3,7 @@ import { HttpError } from '../utils/httpError';
 import { round2 } from '../utils/http';
 import { buildInvoicePdf } from './pdf.service';
 
-export const list = (ownerId: number, limit = 20, offset = 0) =>
+export const list = (ownerId: string, limit = 20, offset = 0) =>
   query(
     `SELECT i.*,
             (SELECT COUNT(*) FROM invoice_items it WHERE it.invoice_id=i.id) AS items_count,
@@ -17,7 +17,7 @@ export const list = (ownerId: number, limit = 20, offset = 0) =>
     [ownerId, limit, offset]
   );
 
-export const getEggStock = async (ownerId: number, client?: any) => {
+export const getEggStock = async (ownerId: string, client?: any) => {
   const sql = `SELECT COALESCE((SELECT SUM(net_eggs) FROM egg_production WHERE owner_id=$1),0) AS produced,
                       COALESCE((SELECT SUM(COALESCE(egg_quantity,0)) FROM invoice_items WHERE owner_id=$1),0) AS sold`;
   const row = client ? (await client.query(sql, [ownerId])).rows[0] : (await query(sql, [ownerId]))[0];
@@ -35,7 +35,7 @@ export const getEggStock = async (ownerId: number, client?: any) => {
 const eggQuantityForItem = (item: any, invoiceType: string) =>
   invoiceType === 'egg_sale' && item.egg_quantity != null ? Number(item.egg_quantity) : null;
 
-export async function getOne(ownerId: number, id: number) {
+export async function getOne(ownerId: string, id: string) {
   const inv = await query('SELECT * FROM invoices WHERE id=$1 AND owner_id=$2', [id, ownerId]);
   if (!inv.length) throw new HttpError(404, 'Invoice not found');
   const items = await query('SELECT * FROM invoice_items WHERE invoice_id=$1 AND owner_id=$2 ORDER BY id', [id, ownerId]);
@@ -43,7 +43,7 @@ export async function getOne(ownerId: number, id: number) {
   return { ...inv[0], items };
 }
 
-export async function create(ownerId: number, d: any) {
+export async function create(ownerId: string, d: any) {
   const items = d.items.map((it: any) => {
     let eggQuantity = null;
     let amount: number;
@@ -77,7 +77,7 @@ export async function create(ownerId: number, d: any) {
   const grand = round2(subtotal + taxAmount);
 
   const id = await withTx(async (c) => {
-    await c.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
+    await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
     const year = new Date().getFullYear();
     const stock = await getEggStock(ownerId, c);
     let totalEggQuantity = 0;
@@ -100,7 +100,7 @@ export async function create(ownerId: number, d: any) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
       [ownerId, year, seq, no, d.invoice_type, d.customer_name, d.customer_mobile, d.invoice_date, subtotal, d.tax_percent, taxAmount, grand, d.notes]
     );
-    const invId = Number(ins.rows[0].id);
+    const invId = ins.rows[0].id;
     for (const it of items) {
       await c.query(
         'INSERT INTO invoice_items (owner_id,invoice_id,description,quantity,unit_price,amount,egg_quantity,egg_unit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
@@ -113,15 +113,15 @@ export async function create(ownerId: number, d: any) {
   return getOne(ownerId, id);
 }
 
-export async function remove(ownerId: number, id: number) {
+export async function remove(ownerId: string, id: string) {
   await withTx(async (c) => {
-    await c.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
+    await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
     const r = await c.query('DELETE FROM invoices WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);
     if (!r.rows.length) throw new HttpError(404, 'Invoice not found');
   });
 }
 
-export async function pdfFor(ownerId: number, id: number) {
+export async function pdfFor(ownerId: string, id: string) {
   const inv = await getOne(ownerId, id);
   const farm = (await query('SELECT farm_name, owner_name, mobile, address, avatar_url FROM users WHERE id=$1', [ownerId]))[0];
   return { buffer: await buildInvoicePdf(inv, inv.items, farm, ownerId), invoice: inv };

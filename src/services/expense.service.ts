@@ -38,7 +38,7 @@ transactions AS (
 )`;
 
 export async function monthlyBreakdown(
-  ownerId: number,
+  ownerId: string,
   month: number,
   year: number,
   limit = 20,

@@ -36,7 +36,7 @@ function sanitizeFilename(originalname: string): string {
 }
 
 export async function uploadBillFile(
-  ownerId: number,
+  ownerId: string,
   category: 'medicines' | 'raw_materials',
   file: Express.Multer.File
 ): Promise<string> {
@@ -55,7 +55,7 @@ export async function uploadBillFile(
   }
 }
 
-export async function uploadProfileAvatar(ownerId: number, file: Express.Multer.File): Promise<string> {
+export async function uploadProfileAvatar(ownerId: string, file: Express.Multer.File): Promise<string> {
   console.log('Supabase configured:', {
     url: Boolean(env.supabaseUrl),
     serviceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()),
@@ -130,7 +130,7 @@ function assertFileSignature(file: Express.Multer.File): void {
 }
 
 export function assertTenantBillUrl(
-  ownerId: number,
+  ownerId: string,
   category: 'medicines' | 'raw_materials',
   fileUrl: string | null | undefined
 ): void {

@@ -1,7 +1,8 @@
 import { Pool, PoolClient, QueryResultRow, types } from 'pg';
 import { env } from './env';
 
-// DATE -> 'YYYY-MM-DD' string (avoids timezone shifts), NUMERIC -> number, BIGINT -> number
+// DATE -> 'YYYY-MM-DD' string (avoids timezone shifts), NUMERIC -> number.
+// UUID columns are returned as strings by node-postgres.
 types.setTypeParser(1082, (v: string) => v);
 types.setTypeParser(1700, (v: string) => parseFloat(v));
 types.setTypeParser(20, (v: string) => parseInt(v, 10));

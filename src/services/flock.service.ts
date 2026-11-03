@@ -1,16 +1,20 @@
 import { query } from '../config/db';
 import { HttpError } from '../utils/httpError';
 
-export async function ensureBatch(ownerId: number, batchId: number | null | undefined) {
+export async function ensureBatch(ownerId: string, batchId: string | null | undefined) {
   if (batchId == null) return;
   const r = await query('SELECT id FROM flock_batches WHERE id=$1 AND owner_id=$2', [batchId, ownerId]);
   if (!r.length) throw new HttpError(404, 'Flock batch not found');
 }
 
-async function liveBirds(ownerId: number, batchId: number, excludeLogId = 0): Promise<number> {
+async function liveBirds(
+  ownerId: string,
+  batchId: string,
+  excludeLogId: string | null = null
+): Promise<number> {
   const r = await query(
     `SELECT b.quantity - COALESCE((SELECT SUM(dead_count) FROM mortality_logs
-        WHERE batch_id=b.id AND owner_id=$2 AND id<>$3),0) AS live
+        WHERE batch_id=b.id AND owner_id=$2 AND ($3::uuid IS NULL OR id<>$3)),0) AS live
      FROM flock_batches b WHERE b.id=$1 AND b.owner_id=$2`,
     [batchId, ownerId, excludeLogId]
   );
@@ -18,7 +22,7 @@ async function liveBirds(ownerId: number, batchId: number, excludeLogId = 0): Pr
   return r[0].live;
 }
 
-export const listBatches = (ownerId: number) =>
+export const listBatches = (ownerId: string) =>
   query(
     `SELECT b.*, COALESCE(m.dead,0) AS total_mortality, b.quantity - COALESCE(m.dead,0) AS active_birds
      FROM flock_batches b
@@ -28,7 +32,7 @@ export const listBatches = (ownerId: number) =>
     [ownerId]
   );
 
-export async function createBatch(ownerId: number, d: any) {
+export async function createBatch(ownerId: string, d: any) {
   const r = await query(
     `INSERT INTO flock_batches (owner_id,batch_name,arrival_date,quantity,unit_price,notes)
      VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
@@ -37,7 +41,7 @@ export async function createBatch(ownerId: number, d: any) {
   return r[0];
 }
 
-export async function updateBatch(ownerId: number, id: number, d: any) {
+export async function updateBatch(ownerId: string, id: string, d: any) {
   const dead = await query('SELECT COALESCE(SUM(dead_count),0) AS dead FROM mortality_logs WHERE batch_id=$1 AND owner_id=$2', [id, ownerId]);
   if (d.quantity < dead[0].dead) throw new HttpError(400, `Quantity cannot be less than recorded mortality (${dead[0].dead})`);
   const r = await query(
@@ -49,20 +53,20 @@ export async function updateBatch(ownerId: number, id: number, d: any) {
   return r[0];
 }
 
-export async function deleteBatch(ownerId: number, id: number) {
+export async function deleteBatch(ownerId: string, id: string) {
   const r = await query('DELETE FROM flock_batches WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);
   if (!r.length) throw new HttpError(404, 'Flock batch not found');
 }
 
-export const listMortality = (ownerId: number, batchId?: number) =>
+export const listMortality = (ownerId: string, batchId?: string) =>
   query(
     `SELECT m.*, b.batch_name FROM mortality_logs m JOIN flock_batches b ON b.id=m.batch_id
-     WHERE m.owner_id=$1 AND ($2::bigint IS NULL OR m.batch_id=$2)
+     WHERE m.owner_id=$1 AND ($2::uuid IS NULL OR m.batch_id=$2)
      ORDER BY m.log_date DESC, m.id DESC`,
     [ownerId, batchId ?? null]
   );
 
-export async function createMortality(ownerId: number, d: any) {
+export async function createMortality(ownerId: string, d: any) {
   const live = await liveBirds(ownerId, d.batch_id);
   if (d.dead_count > live) throw new HttpError(400, `Dead count exceeds live birds in this batch (${live})`);
   const r = await query(
@@ -72,7 +76,7 @@ export async function createMortality(ownerId: number, d: any) {
   return r[0];
 }
 
-export async function updateMortality(ownerId: number, id: number, d: any) {
+export async function updateMortality(ownerId: string, id: string, d: any) {
   const live = await liveBirds(ownerId, d.batch_id, id);
   if (d.dead_count > live) throw new HttpError(400, `Dead count exceeds live birds in this batch (${live})`);
   const r = await query(
@@ -83,7 +87,7 @@ export async function updateMortality(ownerId: number, id: number, d: any) {
   return r[0];
 }
 
-export async function deleteMortality(ownerId: number, id: number) {
+export async function deleteMortality(ownerId: string, id: string) {
   const r = await query('DELETE FROM mortality_logs WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);
   if (!r.length) throw new HttpError(404, 'Mortality log not found');
 }

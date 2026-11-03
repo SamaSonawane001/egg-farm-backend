@@ -3,7 +3,7 @@ import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
 import { ensureBatch } from './flock.service';
 
-export async function getStock(ownerId: number) {
+export async function getStock(ownerId: string) {
   const [totals, feeds, settings] = await Promise.all([
     query(
       `SELECT COALESCE((SELECT SUM(bags) FROM feed_purchases WHERE owner_id=$1),0) AS purchased,
@@ -36,7 +36,7 @@ export async function getStock(ownerId: number) {
   };
 }
 
-export const listPurchases = (ownerId: number, limit = 20, offset = 0) =>
+export const listPurchases = (ownerId: string, limit = 20, offset = 0) =>
   query(
     `SELECT p.*, fp.name AS feed_type, fp.id AS feed_product_id
      FROM feed_purchases p JOIN feed_products fp ON fp.id=p.feed_product_id AND fp.owner_id=p.owner_id
@@ -45,7 +45,7 @@ export const listPurchases = (ownerId: number, limit = 20, offset = 0) =>
     [ownerId, limit, offset]
   );
 
-export const listProducts = (ownerId: number) =>
+export const listProducts = (ownerId: string) =>
   query(
     `SELECT fp.id, fp.name,
             COALESCE((SELECT SUM(p.bags) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS purchased_bags,
@@ -56,8 +56,8 @@ export const listProducts = (ownerId: number) =>
   ).then((rows) => rows.map((row) => ({ ...row, remaining_bags: row.purchased_bags - row.consumed_bags })));
 
 export async function getProductDetail(
-  ownerId: number,
-  id: number,
+  ownerId: string,
+  id: string,
   month: string,
   purchaseOffset = 0,
   usageOffset = 0
@@ -105,7 +105,7 @@ export async function getProductDetail(
   };
 }
 
-export async function createProduct(ownerId: number, name: string) {
+export async function createProduct(ownerId: string, name: string) {
   const rows = await query(
     'INSERT INTO feed_products(owner_id,name) VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING id,name',
     [ownerId, name.trim()]
@@ -114,7 +114,7 @@ export async function createProduct(ownerId: number, name: string) {
   return rows[0];
 }
 
-export async function updateProduct(ownerId: number, id: number, name: string) {
+export async function updateProduct(ownerId: string, id: string, name: string) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const updated = await client.query(
@@ -128,7 +128,7 @@ export async function updateProduct(ownerId: number, id: number, name: string) {
   });
 }
 
-export async function deleteProduct(ownerId: number, id: number) {
+export async function deleteProduct(ownerId: string, id: string) {
   await withTx(async (client) => {
     await lockOwner(client, ownerId);
     const rows = await client.query('DELETE FROM feed_products WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);
@@ -136,14 +136,14 @@ export async function deleteProduct(ownerId: number, id: number) {
   });
 }
 
-const lockOwner = (client: PoolClient, ownerId: number) => client.query('SELECT pg_advisory_xact_lock($1::bigint)', [ownerId]);
+const lockOwner = (client: PoolClient, ownerId: string) => client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
 
 async function remainingForProduct(
   client: PoolClient,
-  ownerId: number,
-  productId: number,
-  excludeUsageId?: number,
-  excludePurchaseId?: number
+  ownerId: string,
+  productId: string,
+  excludeUsageId?: string,
+  excludePurchaseId?: string
 ): Promise<number> {
   const params: any[] = [ownerId, productId];
   const purchaseFilter = excludePurchaseId == null ? '' : ` AND id <> $${params.push(excludePurchaseId)}`;
@@ -162,7 +162,7 @@ function assertEnoughStock(remaining: number, requested: number) {
   }
 }
 
-export async function createPurchase(ownerId: number, d: any) {
+export async function createPurchase(ownerId: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
@@ -176,7 +176,7 @@ export async function createPurchase(ownerId: number, d: any) {
   });
 }
 
-export async function updatePurchase(ownerId: number, id: number, d: any) {
+export async function updatePurchase(ownerId: string, id: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const existing = await client.query('SELECT * FROM feed_purchases WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
@@ -201,7 +201,7 @@ export async function updatePurchase(ownerId: number, id: number, d: any) {
   });
 }
 
-export async function deletePurchase(ownerId: number, id: number) {
+export async function deletePurchase(ownerId: string, id: string) {
   await withTx(async (client) => {
     await lockOwner(client, ownerId);
     const existing = await client.query('SELECT feed_product_id,source FROM feed_purchases WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
@@ -213,7 +213,7 @@ export async function deletePurchase(ownerId: number, id: number) {
   });
 }
 
-export const listUsage = (ownerId: number, limit = 20, offset = 0) =>
+export const listUsage = (ownerId: string, limit = 20, offset = 0) =>
   query(
     `SELECT u.*, b.batch_name FROM feed_usage u LEFT JOIN flock_batches b ON b.id=u.batch_id
      WHERE u.owner_id=$1 ORDER BY u.usage_date DESC, u.id DESC
@@ -221,7 +221,7 @@ export const listUsage = (ownerId: number, limit = 20, offset = 0) =>
     [ownerId, limit, offset]
   );
 
-export async function createUsage(ownerId: number, d: any) {
+export async function createUsage(ownerId: string, d: any) {
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
@@ -240,7 +240,7 @@ export async function createUsage(ownerId: number, d: any) {
   });
 }
 
-export async function updateUsage(ownerId: number, id: number, d: any) {
+export async function updateUsage(ownerId: string, id: string, d: any) {
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
@@ -261,7 +261,7 @@ export async function updateUsage(ownerId: number, id: number, d: any) {
   });
 }
 
-export async function deleteUsage(ownerId: number, id: number) {
+export async function deleteUsage(ownerId: string, id: string) {
   await withTx(async (client) => {
     await lockOwner(client, ownerId);
     const r = await client.query('DELETE FROM feed_usage WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);

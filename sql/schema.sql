@@ -2,7 +2,7 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS users (
-  id BIGSERIAL PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   mobile VARCHAR(15) NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   owner_name VARCHAR(120) NOT NULL,
@@ -25,8 +25,8 @@ DO $$ BEGIN
 END $$;
 
 CREATE TABLE IF NOT EXISTS flock_batches (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   batch_name VARCHAR(120) NOT NULL,
   arrival_date DATE NOT NULL,
   quantity INT NOT NULL CHECK (quantity > 0),
@@ -37,9 +37,9 @@ CREATE TABLE IF NOT EXISTS flock_batches (
 );
 
 CREATE TABLE IF NOT EXISTS mortality_logs (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  batch_id BIGINT NOT NULL REFERENCES flock_batches(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  batch_id UUID NOT NULL REFERENCES flock_batches(id) ON DELETE CASCADE,
   log_date DATE NOT NULL,
   dead_count INT NOT NULL CHECK (dead_count > 0),
   cause TEXT,
@@ -47,8 +47,8 @@ CREATE TABLE IF NOT EXISTS mortality_logs (
 );
 
 CREATE TABLE IF NOT EXISTS feed_products (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name VARCHAR(120) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (owner_id, name)
@@ -57,8 +57,8 @@ CREATE TABLE IF NOT EXISTS feed_products (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_owner_name_ci ON feed_products(owner_id, lower(trim(name)));
 
 CREATE TABLE IF NOT EXISTS feed_purchases (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   delivery_date DATE NOT NULL,
   feed_type VARCHAR(120) NOT NULL,
   bags NUMERIC(12,5) NOT NULL CHECK (bags > 0),
@@ -76,8 +76,8 @@ DO $$ BEGIN
 END $$;
 
 CREATE TABLE IF NOT EXISTS raw_materials (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name VARCHAR(120) NOT NULL,
   unit VARCHAR(30) NOT NULL,
   min_alert_threshold NUMERIC(12,3) NOT NULL DEFAULT 0 CHECK (min_alert_threshold >= 0),
@@ -93,10 +93,10 @@ DO $$ BEGIN
 END $$;
 
 CREATE TABLE IF NOT EXISTS raw_material_processing (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   processing_date DATE NOT NULL,
-  feed_product_id BIGINT NOT NULL REFERENCES feed_products(id) ON DELETE RESTRICT,
+  feed_product_id UUID NOT NULL REFERENCES feed_products(id) ON DELETE RESTRICT,
   quantity_bags NUMERIC(12,5) NOT NULL CHECK (quantity_bags > 0),
   remarks TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -109,9 +109,9 @@ SET produced_quantity = quantity_bags, produced_unit = 'bags'
 WHERE produced_quantity IS NULL OR produced_unit IS NULL;
 
 CREATE TABLE IF NOT EXISTS raw_material_logs (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  material_id BIGINT NOT NULL REFERENCES raw_materials(id) ON DELETE RESTRICT,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  material_id UUID NOT NULL REFERENCES raw_materials(id) ON DELETE RESTRICT,
   transaction_type VARCHAR(30) NOT NULL CHECK (transaction_type IN ('INWARD','OUTWARD_PROCESSING')),
   quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
   unit VARCHAR(30) NOT NULL,
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS raw_material_logs (
   rate_per_unit NUMERIC(14,3) CHECK (rate_per_unit IS NULL OR rate_per_unit >= 0),
   total_amount NUMERIC(14,2) CHECK (total_amount IS NULL OR total_amount >= 0),
   remarks TEXT,
-  processing_id BIGINT REFERENCES raw_material_processing(id) ON DELETE CASCADE,
+  processing_id UUID REFERENCES raw_material_processing(id) ON DELETE CASCADE,
   bill_image_url TEXT,
   bill_number VARCHAR(100),
   vendor_name VARCHAR(150),
@@ -173,7 +173,7 @@ DO $$ BEGIN
     RAISE EXCEPTION 'Cannot merge duplicate raw materials with different units; resolve those records before migrating';
   END IF;
   WITH ranked AS (
-    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
     FROM raw_materials
   )
   UPDATE raw_material_logs l
@@ -181,7 +181,7 @@ DO $$ BEGIN
   FROM ranked
   WHERE l.material_id = ranked.id AND ranked.id <> ranked.keep_id;
   WITH ranked AS (
-    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
     FROM raw_materials
   )
   DELETE FROM raw_materials m
@@ -193,8 +193,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_owner_name_ci
   ON raw_materials(owner_id, lower(trim(name)));
 
 CREATE TABLE IF NOT EXISTS medicines (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name VARCHAR(120) NOT NULL,
   category VARCHAR(20) NOT NULL CHECK (category IN ('Antibiotic','Vitamin','Vaccine','Sanitizer')),
   unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
@@ -204,9 +204,9 @@ CREATE TABLE IF NOT EXISTS medicines (
 );
 
 CREATE TABLE IF NOT EXISTS medicine_batches (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  medicine_id BIGINT NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id UUID NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
   batch_number VARCHAR(120) NOT NULL,
   expiry_date DATE NOT NULL,
   received_quantity NUMERIC(12,3) NOT NULL CHECK (received_quantity > 0),
@@ -218,39 +218,39 @@ CREATE TABLE IF NOT EXISTS medicine_batches (
 );
 
 CREATE TABLE IF NOT EXISTS medicine_usage (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  medicine_id BIGINT NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id UUID NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
   usage_date DATE NOT NULL,
   quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
   unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
-  flock_id BIGINT NOT NULL REFERENCES flock_batches(id) ON DELETE RESTRICT,
+  flock_id UUID NOT NULL REFERENCES flock_batches(id) ON DELETE RESTRICT,
   admin_route VARCHAR(20) NOT NULL CHECK (admin_route IN ('Water','Feed','Spray','Injection')),
   remarks TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS medicine_usage_allocations (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  usage_id BIGINT NOT NULL REFERENCES medicine_usage(id) ON DELETE CASCADE,
-  batch_id BIGINT NOT NULL REFERENCES medicine_batches(id) ON DELETE RESTRICT,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  usage_id UUID NOT NULL REFERENCES medicine_usage(id) ON DELETE CASCADE,
+  batch_id UUID NOT NULL REFERENCES medicine_batches(id) ON DELETE RESTRICT,
   quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0)
 );
 
 CREATE TABLE IF NOT EXISTS medicine_logs (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  medicine_id BIGINT NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  medicine_id UUID NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
   event_type VARCHAR(10) NOT NULL CHECK (event_type IN ('INWARD','USED')),
   quantity NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
   unit VARCHAR(5) NOT NULL CHECK (unit IN ('L','ml','kg','g')),
-  flock_id BIGINT REFERENCES flock_batches(id) ON DELETE RESTRICT,
+  flock_id UUID REFERENCES flock_batches(id) ON DELETE RESTRICT,
   admin_route VARCHAR(20) CHECK (admin_route IS NULL OR admin_route IN ('Water','Feed','Spray','Injection')),
   log_date DATE NOT NULL,
   remarks TEXT,
-  batch_id BIGINT REFERENCES medicine_batches(id) ON DELETE RESTRICT,
-  usage_id BIGINT REFERENCES medicine_usage(id) ON DELETE CASCADE,
+  batch_id UUID REFERENCES medicine_batches(id) ON DELETE RESTRICT,
+  usage_id UUID REFERENCES medicine_usage(id) ON DELETE CASCADE,
   bill_image_url TEXT,
   bill_number VARCHAR(100),
   vendor_name VARCHAR(150),
@@ -292,7 +292,7 @@ DO $$ BEGIN
     RAISE EXCEPTION 'Cannot merge duplicate medicines with different categories or units; resolve those records before migrating';
   END IF;
   WITH ranked AS (
-    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
     FROM medicines
   )
   UPDATE medicine_batches b
@@ -300,7 +300,7 @@ DO $$ BEGIN
   FROM ranked
   WHERE b.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
   WITH ranked AS (
-    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
     FROM medicines
   )
   UPDATE medicine_usage u
@@ -308,7 +308,7 @@ DO $$ BEGIN
   FROM ranked
   WHERE u.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
   WITH ranked AS (
-    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
     FROM medicines
   )
   UPDATE medicine_logs l
@@ -316,7 +316,7 @@ DO $$ BEGIN
   FROM ranked
   WHERE l.medicine_id = ranked.id AND ranked.id <> ranked.keep_id;
   WITH ranked AS (
-    SELECT id, MIN(id) OVER (PARTITION BY owner_id, lower(trim(name))) AS keep_id
+    SELECT id, (MIN(id::text) OVER (PARTITION BY owner_id, lower(trim(name))))::uuid AS keep_id
     FROM medicines
   )
   DELETE FROM medicines m
@@ -328,9 +328,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_owner_name_ci
   ON medicines(owner_id, lower(trim(name)));
 
 CREATE TABLE IF NOT EXISTS feed_usage (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  batch_id BIGINT REFERENCES flock_batches(id) ON DELETE SET NULL,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  batch_id UUID REFERENCES flock_batches(id) ON DELETE SET NULL,
   usage_date DATE NOT NULL,
   quantity NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
   unit VARCHAR(5) NOT NULL CHECK (unit IN ('bags','kg')),
@@ -339,8 +339,8 @@ CREATE TABLE IF NOT EXISTS feed_usage (
 );
 
 ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS feed_type VARCHAR(120);
-ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS feed_product_id BIGINT REFERENCES feed_products(id) ON DELETE CASCADE;
-ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS feed_product_id BIGINT REFERENCES feed_products(id) ON DELETE CASCADE;
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS feed_product_id UUID REFERENCES feed_products(id) ON DELETE CASCADE;
+ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS feed_product_id UUID REFERENCES feed_products(id) ON DELETE CASCADE;
 
 -- Existing usage logs cannot be attributed across multiple feed types reliably.
 -- Backfill only where the owner's purchase history contains exactly one type.
@@ -374,9 +374,9 @@ WHERE u.owner_id = fp.owner_id AND u.feed_type IS NOT NULL
   AND lower(trim(u.feed_type)) = lower(trim(fp.name)) AND u.feed_product_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS egg_production (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  batch_id BIGINT REFERENCES flock_batches(id) ON DELETE SET NULL,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  batch_id UUID REFERENCES flock_batches(id) ON DELETE SET NULL,
   collection_date DATE NOT NULL,
   trays_count INT NOT NULL DEFAULT 0 CHECK (trays_count >= 0),
   loose_eggs INT NOT NULL DEFAULT 0 CHECK (loose_eggs >= 0),
@@ -425,8 +425,8 @@ ALTER TABLE egg_production DROP COLUMN IF EXISTS price_per_egg;
 ALTER TABLE egg_production DROP COLUMN IF EXISTS total_value;
 
 CREATE TABLE IF NOT EXISTS invoices (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   invoice_year INT NOT NULL DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)::int,
   invoice_seq INT NOT NULL,
   invoice_no VARCHAR(30) NOT NULL,
@@ -453,9 +453,9 @@ ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_owner_id_invoice_seq_key
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_owner_year_seq ON invoices(owner_id, invoice_year, invoice_seq);
 
 CREATE TABLE IF NOT EXISTS invoice_items (
-  id BIGSERIAL PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  invoice_id BIGINT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
   description VARCHAR(255) NOT NULL,
   quantity NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
   unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
@@ -497,23 +497,31 @@ CREATE INDEX IF NOT EXISTS idx_mort_owner ON mortality_logs(owner_id, log_date D
 CREATE INDEX IF NOT EXISTS idx_mort_batch ON mortality_logs(batch_id);
 CREATE INDEX IF NOT EXISTS idx_feedp_owner ON feed_purchases(owner_id, delivery_date DESC);
 CREATE INDEX IF NOT EXISTS idx_feedp_product ON feed_purchases(owner_id, feed_product_id, delivery_date DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_processing_feed_product ON raw_material_processing(feed_product_id);
 DROP INDEX IF EXISTS idx_raw_material_tx_owner_date;
 DROP INDEX IF EXISTS idx_raw_material_tx_material;
 CREATE INDEX IF NOT EXISTS idx_raw_material_logs_owner_date ON raw_material_logs(owner_id, transaction_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_material_logs_material ON raw_material_logs(owner_id, material_id, transaction_date DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_material_logs_processing ON raw_material_logs(processing_id);
 CREATE INDEX IF NOT EXISTS idx_raw_material_processing_owner_date ON raw_material_processing(owner_id, processing_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_medicine_batches_owner_item_expiry ON medicine_batches(owner_id, medicine_id, expiry_date);
 CREATE INDEX IF NOT EXISTS idx_medicine_usage_owner_date ON medicine_usage(owner_id, usage_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_usage_flock ON medicine_usage(flock_id);
 CREATE INDEX IF NOT EXISTS idx_medicine_usage_alloc_batch ON medicine_usage_allocations(owner_id, batch_id);
+CREATE INDEX IF NOT EXISTS idx_medicine_usage_alloc_usage ON medicine_usage_allocations(usage_id);
 CREATE INDEX IF NOT EXISTS idx_medicine_logs_owner_date ON medicine_logs(owner_id, log_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_medicine_logs_item ON medicine_logs(owner_id, medicine_id, log_date DESC);
+CREATE INDEX IF NOT EXISTS idx_medicine_logs_flock ON medicine_logs(flock_id);
 CREATE INDEX IF NOT EXISTS idx_feedu_owner ON feed_usage(owner_id, usage_date DESC);
 CREATE INDEX IF NOT EXISTS idx_feedu_owner_type ON feed_usage(owner_id, lower(trim(feed_type)));
 CREATE INDEX IF NOT EXISTS idx_feedu_product ON feed_usage(owner_id, feed_product_id, usage_date DESC);
+CREATE INDEX IF NOT EXISTS idx_feedu_batch ON feed_usage(batch_id);
 CREATE INDEX IF NOT EXISTS idx_egg_owner ON egg_production(owner_id, collection_date DESC);
+CREATE INDEX IF NOT EXISTS idx_egg_batch ON egg_production(batch_id);
 CREATE INDEX IF NOT EXISTS idx_inv_owner ON invoices(owner_id, invoice_date DESC);
 CREATE INDEX IF NOT EXISTS idx_inv_created_owner ON invoices(owner_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_invitems_inv ON invoice_items(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_invitems_owner_invoice ON invoice_items(owner_id, invoice_id);
 
 -- Row-Level-Security ready: policies key off the session setting app.owner_id.
 -- The API connects as the table owner (bypasses RLS) and filters by owner_id in every query.
@@ -526,6 +534,6 @@ BEGIN
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);
-    EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (owner_id = NULLIF(current_setting(''app.owner_id'', true), '''')::bigint)', t);
+    EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (owner_id = NULLIF(current_setting(''app.owner_id'', true), '''')::UUID)', t);
   END LOOP;
 END $$;
