@@ -3,8 +3,8 @@ VALUES (
   'farm-receipts',
   'farm-receipts',
   TRUE,
-  5242880,
-  ARRAY['image/jpeg', 'image/png', 'image/webp', 'application/pdf']
+  15728640,
+  NULL
 )
 ON CONFLICT (id) DO UPDATE SET
   public = EXCLUDED.public,

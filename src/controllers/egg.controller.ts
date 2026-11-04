@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import { asyncHandler, dateStr, idParam, ok, optId } from '../utils/http';
+import { asyncHandler, dateStr, idParam, ok, okPaginated, optId } from '../utils/http';
 import { HttpError } from '../utils/httpError';
 import * as svc from '../services/egg.service';
+import { parsePagination, paginationMetadata } from '../utils/pagination';
 
 const body = z.object({
   collection_date: dateStr,
@@ -19,7 +20,9 @@ export const list = asyncHandler(async (req, res) => {
   if (date && month) {
     throw new HttpError(400, 'Specify either a date or a month, not both');
   }
-  ok(res, await svc.list(req.ownerId, date ? { date } : { month }));
+  const { page, limit, offset } = parsePagination(req.query);
+  const result = await svc.list(req.ownerId, date ? { date } : { month }, limit, offset);
+  okPaginated(res, result.data, paginationMetadata(result.total, page, limit, offset));
 });
 export const summary = asyncHandler(async (req, res) => {
   const today = dateStr.catch(new Date().toISOString().slice(0, 10)).parse(req.query.today);

@@ -18,13 +18,6 @@ const PROFILE_AVATAR_MIME_TYPES = new Set([
   'image/pjpeg',
 ]);
 const PROFILE_AVATAR_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
-const BILL_FILE_TYPES: Record<string, string[]> = {
-  'image/jpeg': ['.jpg', '.jpeg'],
-  'image/png': ['.png'],
-  'image/webp': ['.webp'],
-  'application/pdf': ['.pdf'],
-};
-
 export const uploadAvatar = multer({
   storage: multer.diskStorage({
     destination: dir,
@@ -83,18 +76,32 @@ export const uploadProfileAvatar = (
   });
 };
 
-export const uploadBill = multer({
+const billUploadParser = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024,
+    fileSize: 15 * 1024 * 1024,
     files: 1,
     fields: 1,
     fieldSize: 32,
     parts: 2,
   },
-  fileFilter: (_req, file, cb) => {
-    const extension = path.extname(file.originalname).toLowerCase();
-    if (BILL_FILE_TYPES[file.mimetype]?.includes(extension)) cb(null, true);
-    else cb(new HttpError(400, 'Bill must be a JPEG, PNG, WebP or PDF file with a matching extension') as any);
-  },
+  fileFilter: (_req, _file, cb) => cb(null, true),
 });
+
+export const uploadBill = (req: Request, res: Response, next: NextFunction) => {
+  billUploadParser.single('file')(req, res, (error) => {
+    if (!error) {
+      next();
+      return;
+    }
+    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+      res.status(413).json({
+        success: false,
+        message: 'File exceeds 15MB limit',
+        error: 'File exceeds 15MB limit',
+      });
+      return;
+    }
+    next(error);
+  });
+};

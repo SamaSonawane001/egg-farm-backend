@@ -36,14 +36,24 @@ export async function getStock(ownerId: string) {
   };
 }
 
-export const listPurchases = (ownerId: string, limit = 20, offset = 0) =>
-  query(
-    `SELECT p.*, fp.name AS feed_type, fp.id AS feed_product_id
-     FROM feed_purchases p JOIN feed_products fp ON fp.id=p.feed_product_id AND fp.owner_id=p.owner_id
-     WHERE p.owner_id=$1 ORDER BY p.delivery_date DESC, p.id DESC
-     LIMIT $2 OFFSET $3`,
-    [ownerId, limit, offset]
-  );
+export const listPurchases = async (ownerId: string, limit = 20, offset = 0) => {
+  const [data, count] = await Promise.all([
+    query(
+      `SELECT p.*, fp.name AS feed_type, fp.id AS feed_product_id
+       FROM feed_purchases p JOIN feed_products fp ON fp.id=p.feed_product_id AND fp.owner_id=p.owner_id
+       WHERE p.owner_id=$1 ORDER BY p.delivery_date DESC, p.id DESC
+       LIMIT $2 OFFSET $3`,
+      [ownerId, limit, offset]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS total FROM feed_purchases p
+       JOIN feed_products fp ON fp.id=p.feed_product_id AND fp.owner_id=p.owner_id
+       WHERE p.owner_id=$1`,
+      [ownerId]
+    ),
+  ]);
+  return { data, total: Number(count[0].total) };
+};
 
 export const listProducts = (ownerId: string) =>
   query(
@@ -60,10 +70,11 @@ export async function getProductDetail(
   id: string,
   month: string,
   purchaseOffset = 0,
-  usageOffset = 0
+  usageOffset = 0,
+  limit = 20
 ) {
   const start = `${month}-01`;
-  const [products, purchases, usage, monthly] = await Promise.all([
+  const [products, purchases, usage, purchaseCount, usageCount, monthly] = await Promise.all([
     query(
       `SELECT fp.id, fp.name,
               COALESCE((SELECT SUM(p.bags) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS purchased_bags,
@@ -74,15 +85,26 @@ export async function getProductDetail(
     ),
     query(
       `SELECT * FROM feed_purchases WHERE owner_id=$1 AND feed_product_id=$2
-       ORDER BY delivery_date DESC,id DESC LIMIT 21 OFFSET $3`,
-      [ownerId, id, purchaseOffset]
+       ORDER BY delivery_date DESC,id DESC LIMIT $3 OFFSET $4`,
+      [ownerId, id, limit, purchaseOffset]
     ),
     query(
       `SELECT u.*, b.batch_name FROM feed_usage u LEFT JOIN flock_batches b ON b.id=u.batch_id
        WHERE u.owner_id=$1 AND u.feed_product_id=$2
          AND u.usage_date >= $3::date AND u.usage_date < ($3::date + interval '1 month')
-       ORDER BY u.usage_date DESC,u.id DESC LIMIT 21 OFFSET $4`,
-      [ownerId, id, start, usageOffset]
+       ORDER BY u.usage_date DESC,u.id DESC LIMIT $4 OFFSET $5`,
+      [ownerId, id, start, limit, usageOffset]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS total FROM feed_purchases
+       WHERE owner_id=$1 AND feed_product_id=$2`,
+      [ownerId, id]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS total FROM feed_usage
+       WHERE owner_id=$1 AND feed_product_id=$2
+         AND usage_date >= $3::date AND usage_date < ($3::date + interval '1 month')`,
+      [ownerId, id, start]
     ),
     query(
       `SELECT COALESCE(SUM(bags_equivalent),0) AS consumed_bags FROM feed_usage
@@ -93,15 +115,33 @@ export async function getProductDetail(
   ]);
   if (!products.length) throw new HttpError(404, 'Feed product not found');
   const product = products[0];
+  const totalPurchases = Number(purchaseCount[0].total);
+  const totalUsage = Number(usageCount[0].total);
+  const purchasesPage = Math.floor(purchaseOffset / limit) + 1;
+  const usagePage = Math.floor(usageOffset / limit) + 1;
   return {
     ...product,
     remaining_bags: product.purchased_bags - product.consumed_bags,
     monthly_used_bags: monthly[0].consumed_bags,
     month,
-    purchases: purchases.slice(0, 20),
-    purchases_has_more: purchases.length > 20,
-    usage: usage.slice(0, 20),
-    usage_has_more: usage.length > 20,
+    purchases,
+    purchases_has_more: purchaseOffset + limit < totalPurchases,
+    purchases_pagination: {
+      total: totalPurchases,
+      page: purchasesPage,
+      limit,
+      totalPages: Math.ceil(totalPurchases / limit),
+      hasMore: purchaseOffset + limit < totalPurchases,
+    },
+    usage,
+    usage_has_more: usageOffset + limit < totalUsage,
+    usage_pagination: {
+      total: totalUsage,
+      page: usagePage,
+      limit,
+      totalPages: Math.ceil(totalUsage / limit),
+      hasMore: usageOffset + limit < totalUsage,
+    },
   };
 }
 
@@ -213,13 +253,18 @@ export async function deletePurchase(ownerId: string, id: string) {
   });
 }
 
-export const listUsage = (ownerId: string, limit = 20, offset = 0) =>
-  query(
-    `SELECT u.*, b.batch_name FROM feed_usage u LEFT JOIN flock_batches b ON b.id=u.batch_id
-     WHERE u.owner_id=$1 ORDER BY u.usage_date DESC, u.id DESC
-     LIMIT $2 OFFSET $3`,
-    [ownerId, limit, offset]
-  );
+export const listUsage = async (ownerId: string, limit = 20, offset = 0) => {
+  const [data, count] = await Promise.all([
+    query(
+      `SELECT u.*, b.batch_name FROM feed_usage u LEFT JOIN flock_batches b ON b.id=u.batch_id
+       WHERE u.owner_id=$1 ORDER BY u.usage_date DESC, u.id DESC
+       LIMIT $2 OFFSET $3`,
+      [ownerId, limit, offset]
+    ),
+    query('SELECT COUNT(*)::int AS total FROM feed_usage WHERE owner_id=$1', [ownerId]),
+  ]);
+  return { data, total: Number(count[0].total) };
+};
 
 export async function createUsage(ownerId: string, d: any) {
   await ensureBatch(ownerId, d.batch_id);

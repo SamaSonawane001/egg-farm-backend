@@ -8,15 +8,17 @@ export function notFound(_req: Request, res: Response) {
 
 export function errorHandler(err: any, _req: Request, res: Response, _next: NextFunction) {
   if (err instanceof ZodError) {
-    return res.status(400).json({ error: err.issues.map((i) => `${i.path.join('.') || 'value'}: ${i.message}`).join('; ') });
+    const message = err.issues.map((i) => `${i.path.join('.') || 'value'}: ${i.message}`).join('; ');
+    return res.status(400).json({ success: false, message, error: message });
   }
-  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
-  if (err?.code === '23505') return res.status(409).json({ error: 'Duplicate record' });
-  if (err?.code === '23503') return res.status(409).json({ error: 'Record is referenced by other data' });
+  if (err instanceof HttpError) return res.status(err.status).json({ success: false, message: err.message, error: err.message });
+  if (err?.code === '23505') return res.status(409).json({ success: false, message: 'Duplicate record', error: 'Duplicate record' });
+  if (err?.code === '23503') return res.status(409).json({ success: false, message: 'Record is referenced by other data', error: 'Record is referenced by other data' });
   if (err?.name === 'MulterError') {
-    if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Bill file must be 5 MB or smaller' });
-    return res.status(400).json({ error: 'Invalid file upload' });
+    const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    const message = err.message || `Multer upload failed (${err.code || 'unknown error'})`;
+    return res.status(status).json({ success: false, message, error: message });
   }
   console.error(err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ success: false, message: 'Internal server error', error: 'Internal server error' });
 }

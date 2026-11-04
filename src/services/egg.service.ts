@@ -32,18 +32,38 @@ async function stock(client: PoolClient | null, ownerId: string) {
 
 export const availableStock = (ownerId: string) => stock(null, ownerId);
 
-export const list = (ownerId: string, filter: { date?: string; month?: string } = {}) =>
-  query(
-    `SELECT e.*, b.batch_name FROM egg_production e LEFT JOIN flock_batches b ON b.id=e.batch_id
-     WHERE e.owner_id=$1
-       AND ($2::date IS NULL OR e.collection_date=$2::date)
-       AND ($3::date IS NULL OR (
-         e.collection_date >= $3::date
-         AND e.collection_date < ($3::date + interval '1 month')
-       ))
-     ORDER BY e.collection_date DESC, e.id DESC`,
-    [ownerId, filter.date ?? null, filter.month ? `${filter.month}-01` : null]
-  );
+export const list = async (
+  ownerId: string,
+  filter: { date?: string; month?: string } = {},
+  limit = 20,
+  offset = 0
+) => {
+  const [rows, count] = await Promise.all([
+    query(
+      `SELECT e.*, b.batch_name FROM egg_production e LEFT JOIN flock_batches b ON b.id=e.batch_id
+       WHERE e.owner_id=$1
+         AND ($2::date IS NULL OR e.collection_date=$2::date)
+         AND ($3::date IS NULL OR (
+           e.collection_date >= $3::date
+           AND e.collection_date < ($3::date + interval '1 month')
+         ))
+       ORDER BY e.collection_date DESC, e.id DESC
+       LIMIT $4 OFFSET $5`,
+      [ownerId, filter.date ?? null, filter.month ? `${filter.month}-01` : null, limit, offset]
+    ),
+    query(
+      `SELECT COUNT(*)::int AS total FROM egg_production e
+       WHERE e.owner_id=$1
+         AND ($2::date IS NULL OR e.collection_date=$2::date)
+         AND ($3::date IS NULL OR (
+           e.collection_date >= $3::date
+           AND e.collection_date < ($3::date + interval '1 month')
+         ))`,
+      [ownerId, filter.date ?? null, filter.month ? `${filter.month}-01` : null]
+    ),
+  ]);
+  return { data: rows, total: Number(count[0].total) };
+};
 
 export async function summary(ownerId: string, today: string) {
   const r = await query(

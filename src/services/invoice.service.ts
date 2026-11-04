@@ -3,9 +3,10 @@ import { HttpError } from '../utils/httpError';
 import { round2 } from '../utils/http';
 import { buildInvoicePdf } from './pdf.service';
 
-export const list = (ownerId: string, limit = 20, offset = 0) =>
-  query(
-    `SELECT i.*,
+export const list = async (ownerId: string, limit = 20, offset = 0) => {
+  const [data, count] = await Promise.all([
+    query(
+      `SELECT i.*,
             (SELECT COUNT(*) FROM invoice_items it WHERE it.invoice_id=i.id) AS items_count,
             COALESCE((SELECT json_agg(json_build_object(
               'description',it.description,'quantity',it.quantity,'unit_price',it.unit_price,
@@ -14,8 +15,12 @@ export const list = (ownerId: string, limit = 20, offset = 0) =>
               WHERE it.invoice_id=i.id AND it.owner_id=i.owner_id),'[]'::json) AS items
      FROM invoices i WHERE i.owner_id=$1 ORDER BY i.created_at DESC, i.id DESC
      LIMIT $2 OFFSET $3`,
-    [ownerId, limit, offset]
-  );
+      [ownerId, limit, offset]
+    ),
+    query('SELECT COUNT(*)::int AS total FROM invoices WHERE owner_id=$1', [ownerId]),
+  ]);
+  return { data, total: Number(count[0].total) };
+};
 
 export const getEggStock = async (ownerId: string, client?: any) => {
   const sql = `SELECT COALESCE((SELECT SUM(net_eggs) FROM egg_production WHERE owner_id=$1),0) AS produced,

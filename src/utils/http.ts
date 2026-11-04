@@ -9,6 +9,12 @@ export const asyncHandler =
   };
 
 export const ok = (res: Response, data: any, status = 200) => res.status(status).json({ data });
+export const okPaginated = (
+  res: Response,
+  data: any,
+  pagination: { total: number; page: number; limit: number; totalPages: number; hasMore: boolean },
+  status = 200
+) => res.status(status).json({ success: true, data, pagination });
 
 export const idParam = (v: string): string => {
   if (!z.string().uuid().safeParse(v).success) {

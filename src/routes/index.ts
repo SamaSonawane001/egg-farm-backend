@@ -93,6 +93,6 @@ r.get('/invoices/:id', I.getOne);
 r.get('/invoices/:id/pdf', I.pdf);
 r.delete('/invoices/:id', I.remove);
 
-r.post('/upload/bill', uploadBill.single('file'), U.bill);
+r.post('/upload/bill', uploadBill, U.bill);
 
 export default r;

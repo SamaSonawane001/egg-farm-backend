@@ -25,7 +25,7 @@ function getStorageClient(): SupabaseClient {
 }
 
 function sanitizeFilename(originalname: string): string {
-  const extension = path.extname(originalname).toLowerCase();
+  const extension = path.extname(originalname).toLowerCase() || '.bin';
   const base = path.basename(originalname, path.extname(originalname))
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -41,17 +41,19 @@ export async function uploadBillFile(
   file: Express.Multer.File
 ): Promise<string> {
   const storage = getStorageClient();
-  assertFileSignature(file);
   const objectPath = `bills/farm_${ownerId}/${category}/${Date.now()}_${randomBytes(4).toString('hex')}_${sanitizeFilename(file.originalname)}`;
   try {
     const { error } = await storage.storage.from(env.supabaseStorageBucket).upload(objectPath, file.buffer, {
-      contentType: file.mimetype,
+      contentType: file.mimetype || 'application/octet-stream',
       upsert: false,
     });
     if (error) throw error;
     return storage.storage.from(env.supabaseStorageBucket).getPublicUrl(objectPath).data.publicUrl;
-  } catch {
-    throw new HttpError(502, 'Bill upload failed; please try again');
+  } catch (error) {
+    const message = error && typeof error === 'object' && 'message' in error
+      ? String(error.message)
+      : 'Bill upload failed';
+    throw new HttpError(502, message);
   }
 }
 
@@ -113,20 +115,6 @@ function detectProfileImageType(bytes: Buffer): { contentType: string; extension
     return { contentType: 'image/webp', extension: 'webp' };
   }
   return null;
-}
-
-function assertFileSignature(file: Express.Multer.File): void {
-  const bytes = file.buffer;
-  const valid = file.mimetype === 'image/jpeg'
-    ? bytes.length >= 3 && bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
-    : file.mimetype === 'image/png'
-      ? bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-      : file.mimetype === 'image/webp'
-        ? bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP'
-        : file.mimetype === 'application/pdf'
-          ? bytes.subarray(0, 5).toString('ascii') === '%PDF-'
-          : false;
-  if (!valid) throw new HttpError(400, 'Bill file contents do not match the selected file type');
 }
 
 export function assertTenantBillUrl(
