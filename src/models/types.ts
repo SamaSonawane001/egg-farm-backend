@@ -4,6 +4,8 @@ export interface User {
   owner_name: string;
   farm_name: string;
   avatar_url: string | null;
+  signature_url: string | null;
+  payment_qr_url: string | null;
   address: string | null;
   low_stock_threshold: number;
   kg_per_bag: number;

@@ -6,7 +6,7 @@ import { HttpError } from '../utils/httpError';
 import { User } from '../models/types';
 
 export const USER_COLS =
-  'id, mobile, owner_name, farm_name, avatar_url, address, low_stock_threshold, kg_per_bag, default_tax_percent, eggs_per_tray';
+  'id, mobile, owner_name, farm_name, avatar_url, signature_url, payment_qr_url, address, low_stock_threshold, kg_per_bag, default_tax_percent, eggs_per_tray';
 
 const sign = (ownerId: string) => jwt.sign({ ownerId }, env.jwtSecret, { expiresIn: env.jwtExpires as any });
 
@@ -51,6 +51,20 @@ export async function updateProfile(
     [ownerId, i.owner_name ?? null, i.farm_name ?? null, i.address ?? null, i.low_stock_threshold ?? null,
      i.kg_per_bag ?? null, i.default_tax_percent ?? null, i.avatar_url ?? null, i.eggs_per_tray ?? null]
   );
+  return rows[0];
+}
+
+export async function updateFarmAsset(
+  ownerId: string,
+  asset: 'signature' | 'payment_qr',
+  url: string | null,
+) {
+  const column = asset === 'signature' ? 'signature_url' : 'payment_qr_url';
+  const rows = await query<User>(
+    `UPDATE users SET ${column}=$2 WHERE id=$1 RETURNING ${USER_COLS}`,
+    [ownerId, url],
+  );
+  if (!rows.length) throw new HttpError(404, 'Farm profile not found');
   return rows[0];
 }
 

@@ -4,6 +4,22 @@ import { HttpError } from '../utils/httpError';
 
 const lockOwner = (client: PoolClient, ownerId: string) =>
   client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+const stockCost = (quantity: number, d: any) =>
+  Math.round((d.rate_per_unit == null ? Number(d.total_cost) : quantity * Number(d.rate_per_unit)) * 100) / 100;
+
+function quantityInMedicineUnit(quantity: number, fromUnit: string, medicineUnit: string) {
+  const sameDimension =
+    (fromUnit === 'L' || fromUnit === 'ml') ===
+    (medicineUnit === 'L' || medicineUnit === 'ml');
+  if (!sameDimension) throw new HttpError(400, 'Inward unit must match the medicine dimension');
+  const factor =
+    fromUnit === medicineUnit
+      ? 1
+      : fromUnit === 'L' || fromUnit === 'kg'
+        ? 1000
+        : 0.001;
+  return Math.round(quantity * factor * 1000) / 1000;
+}
 
 export async function listMedicines(ownerId: string) {
   return query(
@@ -79,7 +95,10 @@ export async function getMedicineDetails(
     query(
       `SELECT b.id,b.batch_number,b.expiry_date,b.received_quantity AS quantity,
               b.unit,b.total_cost,b.received_date AS date,b.remarks,
-              l.bill_image_url,l.bill_number,l.vendor_name
+              COALESCE(b.entered_quantity,b.received_quantity) AS entered_quantity,
+              COALESCE(b.entered_unit,b.unit) AS entered_unit,
+              COALESCE(b.rate_per_unit,ROUND(b.total_cost/NULLIF(b.received_quantity,0),3)) AS rate_per_unit,
+              l.bill_number,l.vendor_name
        FROM medicine_batches b
        LEFT JOIN medicine_logs l
          ON l.batch_id=b.id AND l.owner_id=b.owner_id
@@ -206,22 +225,27 @@ export async function receiveMedicine(ownerId: string, d: any) {
       medicine = created;
     }
     if (!medicine.rows.length) throw new HttpError(404, 'Medicine not found');
-    if (medicine.rows[0].unit !== d.unit) throw new HttpError(400, 'Unit must match the medicine unit');
     if (d.category && medicine.rows[0].category !== d.category) {
       throw new HttpError(400, 'Category must match the selected medicine');
     }
+    const medicineUnit = medicine.rows[0].unit;
+    const stockQuantity = quantityInMedicineUnit(d.quantity, d.unit, medicineUnit);
+    const totalCost = stockCost(d.quantity, d);
     const result = await client.query(
       `INSERT INTO medicine_batches
-       (owner_id,medicine_id,batch_number,expiry_date,received_quantity,unit,total_cost,received_date,remarks)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [ownerId, medicine.rows[0].id, d.batch_number, d.expiry_date, d.quantity, d.unit, d.total_cost, d.date, d.remarks]
+       (owner_id,medicine_id,batch_number,expiry_date,received_quantity,unit,total_cost,received_date,remarks,
+        entered_quantity,entered_unit,rate_per_unit)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [ownerId, medicine.rows[0].id, d.batch_number, d.expiry_date, stockQuantity,
+        medicineUnit, totalCost, d.date, d.remarks, d.quantity, d.unit,
+        d.rate_per_unit ?? totalCost / d.quantity]
     );
     await client.query(
       `INSERT INTO medicine_logs
-       (owner_id,medicine_id,event_type,quantity,unit,log_date,remarks,batch_id,bill_image_url,bill_number,vendor_name)
-       VALUES($1,$2,'INWARD',$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [ownerId, medicine.rows[0].id, d.quantity, d.unit, d.date, d.remarks, result.rows[0].id,
-        d.bill_image_url, d.bill_number, d.vendor_name]
+       (owner_id,medicine_id,event_type,quantity,unit,log_date,remarks,batch_id,bill_number,vendor_name)
+       VALUES($1,$2,'INWARD',$3,$4,$5,$6,$7,$8,$9)`,
+      [ownerId, medicine.rows[0].id, stockQuantity, medicineUnit, d.date, d.remarks, result.rows[0].id,
+        d.bill_number, d.vendor_name]
     );
     return result.rows[0];
   });
@@ -249,17 +273,17 @@ export async function updateMedicineBatch(
       [ownerId, medicineId, batchId],
     );
     if (!batch.rows.length) throw new HttpError(404, 'Medicine batch not found');
-    if (batch.rows[0].medicine_unit !== d.unit ||
-        batch.rows[0].unit !== d.unit) {
-      throw new HttpError(400, 'Unit must match the medicine unit');
-    }
-    if (Number(d.quantity) + 0.0005 < Number(batch.rows[0].consumed)) {
+    const medicineUnit = batch.rows[0].medicine_unit;
+    const stockQuantity = quantityInMedicineUnit(d.quantity, d.unit, medicineUnit);
+    if (stockQuantity + 0.0005 < Number(batch.rows[0].consumed)) {
       throw new HttpError(400, 'Received quantity cannot be below the quantity already used from this batch');
     }
+    const totalCost = stockCost(d.quantity, d);
     const updated = await client.query(
       `UPDATE medicine_batches
        SET batch_number=$4,expiry_date=$5,received_quantity=$6,total_cost=$7,
-           received_date=$8,remarks=$9
+           received_date=$8,remarks=$9,unit=$10,entered_quantity=$11,
+           entered_unit=$12,rate_per_unit=$13
        WHERE owner_id=$1 AND medicine_id=$2 AND id=$3
        RETURNING *`,
       [
@@ -268,25 +292,29 @@ export async function updateMedicineBatch(
         batchId,
         d.batch_number,
         d.expiry_date,
-        d.quantity,
-        d.total_cost,
+        stockQuantity,
+        totalCost,
         d.date,
         d.remarks,
+        medicineUnit,
+        d.quantity,
+        d.unit,
+        d.rate_per_unit ?? totalCost / d.quantity,
       ],
     );
     await client.query(
       `UPDATE medicine_logs
-       SET quantity=$4,log_date=$5,remarks=$6,bill_image_url=$7,
+       SET quantity=$4,unit=$5,log_date=$6,remarks=$7,
            bill_number=$8,vendor_name=$9
        WHERE owner_id=$1 AND medicine_id=$2 AND batch_id=$3`,
       [
         ownerId,
         medicineId,
         batchId,
-        d.quantity,
+        stockQuantity,
+        medicineUnit,
         d.date,
         d.remarks,
-        d.bill_image_url,
         d.bill_number,
         d.vendor_name,
       ],

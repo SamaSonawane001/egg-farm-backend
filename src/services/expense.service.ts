@@ -7,14 +7,14 @@ const transactionsCte = `WITH period AS (
 transactions AS (
   SELECT ('feed-' || p.id::text) AS id,p.delivery_date AS date,'Feed'::text AS category,
          p.feed_type || ' (' || p.bags::text || ' bags)' AS title,
-         p.total_cost AS amount,NULL::text AS vendor,NULL::text AS bill_image_url
+         p.total_cost AS amount,NULL::text AS vendor
   FROM feed_purchases p,period d
   WHERE p.owner_id=$1 AND p.delivery_date >= d.start_date AND p.delivery_date < d.end_date
     AND p.source='PURCHASE'
   UNION ALL
   SELECT ('raw-' || l.id::text),l.transaction_date,'Raw Materials'::text,
          m.name || ' (' || l.quantity::text || ' ' || l.unit || ')',
-         l.total_amount,COALESCE(l.vendor_name,l.supplier),l.bill_image_url
+         l.total_amount,COALESCE(l.vendor_name,l.supplier)
   FROM raw_material_logs l
   JOIN raw_materials m ON m.id=l.material_id AND m.owner_id=l.owner_id,
   period d
@@ -23,7 +23,7 @@ transactions AS (
   UNION ALL
   SELECT ('medicine-' || b.id::text),b.received_date,'Medicines & Health'::text,
          m.name || ' (' || b.received_quantity::text || ' ' || b.unit || ')',
-         b.total_cost,l.vendor_name,l.bill_image_url
+         b.total_cost,l.vendor_name
   FROM medicine_batches b
   JOIN medicines m ON m.id=b.medicine_id AND m.owner_id=b.owner_id
   LEFT JOIN medicine_logs l ON l.owner_id=b.owner_id AND l.batch_id=b.id,
@@ -32,9 +32,22 @@ transactions AS (
   UNION ALL
   SELECT ('flock-' || f.id::text),f.arrival_date,'Birds / Chicks'::text,
          f.batch_name || ' (' || f.quantity::text || ' birds)',
-         f.total_cost,NULL::text,NULL::text
+         f.total_cost,NULL::text
   FROM flock_batches f,period d
   WHERE f.owner_id=$1 AND f.arrival_date >= d.start_date AND f.arrival_date < d.end_date
+  UNION ALL
+  SELECT ('farm-expense-' || e.id::text),e.expense_date,
+         CASE e.category
+           WHEN 'farm_labour_salary' THEN 'Farm Labour / Salary'
+           WHEN 'feed_truck_unloading_hamali' THEN 'Feed Truck Unloading / Hamali'
+           WHEN 'feed_mill_expense' THEN 'Feed Mill Expense'
+           WHEN 'electricity_water' THEN 'Electricity & Water'
+           WHEN 'transport_diesel' THEN 'Transport & Diesel'
+           ELSE 'Other Farm Expense'
+         END,
+         e.description,e.amount,e.person_or_vendor
+  FROM farm_expenses e,period d
+  WHERE e.owner_id=$1 AND e.expense_date >= d.start_date AND e.expense_date < d.end_date
 )`;
 
 export async function monthlyBreakdown(

@@ -1,7 +1,9 @@
+import { Request, Response } from 'express';
 import { z } from 'zod';
 import { asyncHandler, ok } from '../utils/http';
 import * as svc from '../services/auth.service';
-import { uploadProfileAvatar } from '../services/storage.service';
+import { normalizeFarmImage, uploadProfileAvatar } from '../services/storage.service';
+import { HttpError } from '../utils/httpError';
 
 const mobile = z.string().trim().regex(/^[0-9]{10,13}$/, 'Enter a valid mobile number (10-13 digits, no spaces)');
 const password = z.string().min(6, 'Password must be at least 6 characters').max(100);
@@ -36,6 +38,39 @@ export const updateProfile = asyncHandler(async (req, res) => {
   const avatar_url = req.file ? await uploadProfileAvatar(req.ownerId, req.file) : undefined;
   ok(res, await svc.updateProfile(req.ownerId, { ...b, avatar_url }));
 });
+
+const farmAssetType = z.enum(['signature', 'payment_qr']);
+
+async function storeFarmAssetImage(
+  asset: z.infer<typeof farmAssetType>,
+  req: Request,
+  res: Response,
+) {
+  if (!req.file?.buffer?.length) throw new HttpError(400, 'Please select an image');
+  const image = await normalizeFarmImage(req.file.buffer);
+  const dataUri = `data:image/png;base64,${image.toString('base64')}`;
+  const user = await svc.updateFarmAsset(req.ownerId, asset, dataUri);
+  ok(res, { asset, url: dataUri, user });
+}
+
+export const uploadFarmAssetImage = asyncHandler(async (req, res) =>
+  storeFarmAssetImage(farmAssetType.parse(req.params.asset), req, res));
+export const uploadFarmSignature = asyncHandler(async (req, res) =>
+  storeFarmAssetImage('signature', req, res));
+export const uploadFarmPaymentQr = asyncHandler(async (req, res) =>
+  storeFarmAssetImage('payment_qr', req, res));
+
+async function removeFarmAssetImage(asset: z.infer<typeof farmAssetType>, req: Request, res: Response) {
+  const user = await svc.updateFarmAsset(req.ownerId, asset, null);
+  ok(res, { asset, user });
+}
+
+export const removeFarmAsset = asyncHandler(async (req, res) =>
+  removeFarmAssetImage(farmAssetType.parse(req.params.asset), req, res));
+export const removeFarmSignature = asyncHandler(async (req, res) =>
+  removeFarmAssetImage('signature', req, res));
+export const removeFarmPaymentQr = asyncHandler(async (req, res) =>
+  removeFarmAssetImage('payment_qr', req, res));
 
 export const changePassword = asyncHandler(async (req, res) => {
   const b = z.object({ current_password: z.string().min(1), new_password: password }).parse(req.body);

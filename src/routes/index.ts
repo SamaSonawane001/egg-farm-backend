@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { auth } from '../middlewares/auth';
-import { uploadAvatar, uploadBill, uploadProfileAvatar } from '../middlewares/upload';
+import { uploadAvatar, uploadProfileAsset, uploadProfileAvatar } from '../middlewares/upload';
 import * as A from '../controllers/auth.controller';
 import * as F from '../controllers/flock.controller';
 import * as D from '../controllers/feed.controller';
@@ -9,6 +9,7 @@ import * as I from '../controllers/invoice.controller';
 import * as RM from '../controllers/rawMaterial.controller';
 import * as M from '../controllers/medicine.controller';
 import * as X from '../controllers/expense.controller';
+import * as FX from '../controllers/farmExpense.controller';
 import { dashboard } from '../controllers/dashboard.controller';
 import { health } from '../controllers/health.controller';
 import * as U from '../controllers/upload.controller';
@@ -18,7 +19,7 @@ const r = Router();
 // ---- public ----
 r.post('/auth/register', uploadAvatar, A.register);
 r.post('/auth/login', A.login);
-r.get('/public/invoices/:token/pdf', I.publicPdf);
+r.get('/public/invoices/:id/pdf', I.publicPdf);
 r.get('/health', health);
 
 // ---- everything below requires a valid JWT; req.ownerId is the tenant ----
@@ -26,9 +27,23 @@ r.use(auth);
 r.get('/auth/me', A.me);
 r.put('/profile', uploadProfileAvatar, A.updateProfile);
 r.post('/profile/upload-avatar', uploadProfileAvatar, U.avatar);
+r.post('/profile/assets/:asset', uploadProfileAsset, A.uploadFarmAssetImage);
+r.delete('/profile/assets/:asset', A.removeFarmAsset);
+r.get('/farm/profile', A.me);
+r.put('/farm/profile', uploadProfileAvatar, A.updateProfile);
+r.post('/farm/profile/assets/:asset', uploadProfileAsset, A.uploadFarmAssetImage);
+r.delete('/farm/profile/assets/:asset', A.removeFarmAsset);
+r.post('/farm/signature', uploadProfileAsset, A.uploadFarmSignature);
+r.delete('/farm/signature', A.removeFarmSignature);
+r.post('/farm/payment-qr', uploadProfileAsset, A.uploadFarmPaymentQr);
+r.delete('/farm/payment-qr', A.removeFarmPaymentQr);
 r.post('/profile/password', A.changePassword);
 r.get('/dashboard', dashboard);
 r.get('/expenses/monthly-breakdown', X.monthlyBreakdownController);
+r.get('/farm-expenses', FX.list);
+r.post('/farm-expenses', FX.create);
+r.put('/farm-expenses/:id', FX.update);
+r.delete('/farm-expenses/:id', FX.remove);
 
 r.get('/flock/batches', F.listBatches);
 r.post('/flock/batches', F.createBatch);
@@ -39,8 +54,15 @@ r.post('/flock/mortality', F.createMortality);
 r.put('/flock/mortality/:id', F.updateMortality);
 r.delete('/flock/mortality/:id', F.deleteMortality);
 
+r.get('/feed', D.products);
 r.get('/feed/stock', D.stock);
 r.get('/feed/products', D.products);
+r.get('/feed/ready-feed', D.readyFeedDetail);
+r.post('/feed/prepare-ready-feed', D.prepareReadyFeed);
+r.put('/feed/prepare-ready-feed/:id', D.updateReadyFeedPreparation);
+r.delete('/feed/prepare-ready-feed/:id', D.deleteReadyFeedPreparation);
+r.put('/feed/ready-feed/preparations/:id', D.updateReadyFeedPreparation);
+r.delete('/feed/ready-feed/preparations/:id', D.deleteReadyFeedPreparation);
 r.post('/feed/products', D.createProduct);
 r.get('/feed/products/:id', D.productDetail);
 r.put('/feed/products/:id', D.updateProduct);
@@ -59,8 +81,13 @@ r.post('/raw-materials', RM.create);
 r.put('/raw-materials/:id', RM.update);
 r.delete('/raw-materials/:id', RM.remove);
 r.post('/raw-materials/inward', RM.inward);
+r.put('/raw-materials/inward/:id', RM.updateInward);
+r.delete('/raw-materials/inward/:id', RM.removeInward);
+r.put('/raw-materials/usage/:id', RM.updateUsage);
+r.delete('/raw-materials/usage/:id', RM.removeUsage);
 r.get('/raw-materials/logs', RM.logs);
 r.get('/raw-materials/processing', RM.processing);
+r.delete('/raw-materials/processing/:id', RM.removeProcessing);
 r.get('/raw-materials/:id', RM.details);
 r.post('/raw-materials/processing', RM.createProcessing);
 
@@ -87,12 +114,15 @@ r.post('/eggs', E.create);
 r.put('/eggs/:id', E.update);
 r.delete('/eggs/:id', E.remove);
 
+r.get('/invoices/payment-summary', I.paymentSummary);
 r.get('/invoices', I.list);
 r.post('/invoices', I.create);
-r.get('/invoices/:id', I.getOne);
-r.get('/invoices/:id/pdf', I.pdf);
-r.delete('/invoices/:id', I.remove);
-
-r.post('/upload/bill', uploadBill, U.bill);
+r.patch(
+  '/invoices/:id([0-9a-fA-F-]{36})/payment-status',
+  I.updatePaymentStatus,
+);
+r.get('/invoices/:id([0-9a-fA-F-]{36})/pdf', I.pdf);
+r.get('/invoices/:id([0-9a-fA-F-]{36})', I.getOne);
+r.delete('/invoices/:id([0-9a-fA-F-]{36})', I.remove);
 
 export default r;

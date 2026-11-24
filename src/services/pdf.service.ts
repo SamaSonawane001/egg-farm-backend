@@ -110,13 +110,107 @@ async function loadFarmLogo(logoUrl: string | null | undefined, ownerId: string)
   }
 }
 
+function resolveFarmAssetUrl(
+  assetUrl: string | null | undefined,
+  ownerId: string,
+  asset: 'signature' | 'payment_qr',
+): URL | null {
+  if (!assetUrl || !env.supabaseUrl) return null;
+  try {
+    const url = new URL(assetUrl);
+    const supabase = new URL(env.supabaseUrl);
+    const buckets = new Set([env.supabaseStorageBucket, 'farm-profiles']);
+    const folder = asset === 'signature' ? 'signatures' : 'payment-qrs';
+    const filename = asset === 'signature'
+      ? /^signature_\d+_[a-f0-9]{8}\.png$/i
+      : /^payment_qr_\d+_[a-f0-9]{8}\.png$/i;
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    if (url.username || url.password || url.search || url.hash) return null;
+    for (const bucket of buckets) {
+      const prefix = `${supabase.pathname.replace(/\/$/, '')}/storage/v1/object/public/${bucket}/${folder}/${ownerId}/`;
+      if (
+        url.origin === supabase.origin &&
+        url.pathname.startsWith(prefix) &&
+        filename.test(url.pathname.slice(prefix.length))
+      ) {
+        return url;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function loadFarmAsset(
+  assetUrl: string | null | undefined,
+  ownerId: string,
+  asset: 'signature' | 'payment_qr',
+): Promise<string | null> {
+  const dataUriPrefix = 'data:image/png;base64,';
+  if (assetUrl?.startsWith(dataUriPrefix)) {
+    const encoded = assetUrl.slice(dataUriPrefix.length);
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length > MAX_LOGO_BYTES * 4 / 3) {
+      return null;
+    }
+    const bytes = Buffer.from(encoded, 'base64');
+    if (
+      bytes.length > MAX_LOGO_BYTES ||
+      !bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    ) return null;
+    return `${dataUriPrefix}${bytes.toString('base64')}`;
+  }
+  const url = resolveFarmAssetUrl(assetUrl, ownerId, asset);
+  if (!url) return null;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(url, { signal: controller.signal, redirect: 'error' });
+    if (!response.ok) return null;
+    const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+    if (contentType !== 'image/png') return null;
+    const length = Number(response.headers.get('content-length'));
+    if (Number.isFinite(length) && length > MAX_LOGO_BYTES) return null;
+    const reader = response.body?.getReader();
+    if (!reader) return null;
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_LOGO_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(Buffer.from(value));
+    }
+    const bytes = Buffer.concat(chunks, totalBytes);
+    if (!bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return null;
+    return `data:image/png;base64,${bytes.toString('base64')}`;
+  } catch (error) {
+    console.warn(`Failed to load farm ${asset} for invoice PDF:`, error);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId: string): Promise<Buffer> {
-  const logo = await loadFarmLogo(farm.avatar_url, ownerId);
+  const [logo, signature, paymentQr] = await Promise.all([
+    loadFarmLogo(farm.avatar_url, ownerId),
+    loadFarmAsset(farm.signature_url, ownerId, 'signature'),
+    loadFarmAsset(farm.payment_qr_url, ownerId, 'payment_qr'),
+  ]);
+  const images: Record<string, string> = {};
+  if (logo) images.farmLogo = logo;
+  if (signature) images.farmSignature = signature;
+  if (paymentQr) images.paymentQr = paymentQr;
   const def: any = {
     defaultStyle: { font: 'Helvetica', fontSize: 10, color: '#1C1917' },
     pageSize: 'A4',
-    pageMargins: [40, 40, 40, 50],
-    ...(logo ? { images: { farmLogo: logo } } : {}),
+    pageMargins: [40, 40, 40, 245],
+    ...(Object.keys(images).length ? { images } : {}),
     content: [
       {
         margin: [0, 0, 0, 12],
@@ -143,7 +237,7 @@ export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId
             margin: [0, 8, 0, 0],
             stack: [
               { text: 'INVOICE', fontSize: 22, bold: true, alignment: 'right' },
-              { text: inv.invoice_no, fontSize: 10, alignment: 'right', color: GREY, margin: [0, 3, 0, 0] },
+              { text: `Customer: ${inv.customer_name || 'Walk-in Customer'}`, fontSize: 9, alignment: 'right', color: GREY, margin: [0, 3, 0, 0] },
               { text: `Date: ${inv.invoice_date}`, fontSize: 10, alignment: 'right', color: GREY, margin: [0, 3, 0, 0] },
               { text: INVOICE_TYPE_LABEL[inv.invoice_type as InvoiceType] || inv.invoice_type, fontSize: 11, alignment: 'right', bold: true, color: GREEN, margin: [0, 3, 0, 0] },
             ],
@@ -204,7 +298,70 @@ export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId
       },
       ...(inv.notes ? [{ text: `Notes: ${inv.notes}`, color: GREY, margin: [0, 20, 0, 0] }] : []),
     ],
-    footer: { text: 'Thank you for your business!', alignment: 'center', color: GREY, fontSize: 9 },
+    footer: {
+      margin: [40, 0, 40, 18],
+      columns: [
+        {
+          width: 200,
+          stack: paymentQr
+            ? [
+                {
+                  text: 'Scan to Pay (UPI / Bank)',
+                  fontSize: 9.5,
+                  color: GREY,
+                  alignment: 'left',
+                  margin: [0, 0, 0, 4],
+                },
+                { image: 'paymentQr', fit: [185, 185], alignment: 'left' },
+              ]
+            : [],
+        },
+        {
+          width: 115,
+          text: 'Thank you for your business!',
+          alignment: 'center',
+          color: GREY,
+          fontSize: 9,
+          margin: [0, 188, 0, 0],
+        },
+        {
+          width: 200,
+          stack: signature
+            ? [
+                {
+                  text: `For ${(farm.farm_name || '').toUpperCase()}`,
+                  fontSize: 10,
+                  bold: true,
+                  color: '#334155',
+                  alignment: 'center',
+                  margin: [0, 0, 0, 3],
+                },
+                { image: 'farmSignature', fit: [160, 75], alignment: 'center' },
+                {
+                  canvas: [
+                    {
+                      type: 'line',
+                      x1: 20,
+                      y1: 1,
+                      x2: 180,
+                      y2: 1,
+                      lineWidth: 0.6,
+                      lineColor: '#A8A29E',
+                    },
+                  ],
+                  margin: [0, 2, 0, 3],
+                },
+                {
+                  text: 'Authorized Signatory',
+                  fontSize: 9.5,
+                  color: GREY,
+                  alignment: 'center',
+                },
+              ]
+            : [],
+        },
+      ],
+    },
   };
 
   const doc = printer.createPdfKitDocument(def);

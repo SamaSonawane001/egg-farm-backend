@@ -1,10 +1,18 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { randomBytes } from 'crypto';
-import path from 'path';
 import { env } from '../config/env';
 import { HttpError } from '../utils/httpError';
+import sharp from 'sharp';
 
 let client: SupabaseClient | undefined;
+const heicConvert = require('heic-convert') as (options: {
+  buffer: Buffer;
+  format: 'PNG';
+  quality: number;
+}) => Promise<Buffer>;
+const bmpDecoder = require('bmp-js') as {
+  decode: (buffer: Buffer) => { data: Buffer; width: number; height: number };
+};
 
 function getStorageClient(): SupabaseClient {
   if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
@@ -22,39 +30,6 @@ function getStorageClient(): SupabaseClient {
     });
   }
   return client;
-}
-
-function sanitizeFilename(originalname: string): string {
-  const extension = path.extname(originalname).toLowerCase() || '.bin';
-  const base = path.basename(originalname, path.extname(originalname))
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9_-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 100);
-  return `${base || 'bill'}${extension}`;
-}
-
-export async function uploadBillFile(
-  ownerId: string,
-  category: 'medicines' | 'raw_materials',
-  file: Express.Multer.File
-): Promise<string> {
-  const storage = getStorageClient();
-  const objectPath = `bills/farm_${ownerId}/${category}/${Date.now()}_${randomBytes(4).toString('hex')}_${sanitizeFilename(file.originalname)}`;
-  try {
-    const { error } = await storage.storage.from(env.supabaseStorageBucket).upload(objectPath, file.buffer, {
-      contentType: file.mimetype || 'application/octet-stream',
-      upsert: false,
-    });
-    if (error) throw error;
-    return storage.storage.from(env.supabaseStorageBucket).getPublicUrl(objectPath).data.publicUrl;
-  } catch (error) {
-    const message = error && typeof error === 'object' && 'message' in error
-      ? String(error.message)
-      : 'Bill upload failed';
-    throw new HttpError(502, message);
-  }
 }
 
 export async function uploadProfileAvatar(ownerId: string, file: Express.Multer.File): Promise<string> {
@@ -117,32 +92,54 @@ function detectProfileImageType(bytes: Buffer): { contentType: string; extension
   return null;
 }
 
-export function assertTenantBillUrl(
-  ownerId: string,
-  category: 'medicines' | 'raw_materials',
-  fileUrl: string | null | undefined
-): void {
-  if (!fileUrl) return;
-  if (!env.supabaseUrl) {
-    throw new HttpError(503, 'Bill uploads are not configured');
-  }
+export async function normalizeFarmImage(bytes: Buffer): Promise<Buffer> {
   try {
-    const url = new URL(fileUrl);
-    const base = new URL(env.supabaseUrl);
-    const prefix = `${base.pathname.replace(/\/$/, '')}/storage/v1/object/public/${env.supabaseStorageBucket}/bills/farm_${ownerId}/${category}/`;
-    const objectName = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '';
-    if (
-      url.origin !== base.origin ||
-      !objectName ||
-      objectName.includes('/') ||
-      /%2f/i.test(objectName) ||
-      url.search ||
-      url.hash
-    ) {
-      throw new HttpError(400, "Bill URL must reference this farm's uploaded receipt");
+    let input = bytes;
+    if (bytes.length >= 12 && bytes.toString('ascii', 0, 2) === 'BM') {
+      if (bytes.length < 26) throw new Error('Invalid BMP header');
+      const width = bytes.readInt32LE(18);
+      const height = Math.abs(bytes.readInt32LE(22));
+      if (width <= 0 || height <= 0 || width * height > 40_000_000) {
+        throw new Error('BMP dimensions are invalid or too large');
+      }
+      const bitmap = bmpDecoder.decode(bytes);
+      if (bitmap.data.length !== bitmap.width * bitmap.height * 4) {
+        throw new Error('BMP pixel data is invalid');
+      }
+      const rgba = Buffer.allocUnsafe(bitmap.width * bitmap.height * 4);
+      for (let i = 0; i < bitmap.data.length; i += 4) {
+        rgba[i] = bitmap.data[i + 3];
+        rgba[i + 1] = bitmap.data[i + 2];
+        rgba[i + 2] = bitmap.data[i + 1];
+        rgba[i + 3] = bitmap.data[i];
+      }
+      input = await sharp(rgba, {
+        raw: { width: bitmap.width, height: bitmap.height, channels: 4 },
+      }).png().toBuffer();
+    } else {
+      const brands = bytes.toString('ascii', 4, 32).toLowerCase();
+      const isAvif = brands.includes('avif') || brands.includes('avis');
+      if (!isAvif && /(?:heic|heix|hevc|hevx|mif1|msf1)/.test(brands)) {
+        input = await heicConvert({ buffer: bytes, format: 'PNG', quality: 1 });
+      }
     }
+    const normalized = await sharp(input, { limitInputPixels: 40_000_000, failOn: 'error' })
+      .rotate()
+      .resize(1400, 1400, { fit: 'inside', withoutEnlargement: true })
+      .png({ compressionLevel: 9, palette: true, quality: 90 })
+      .toBuffer();
+    if (normalized.length > 2_900_000) {
+      const smaller = await sharp(input, { limitInputPixels: 40_000_000, failOn: 'error' })
+        .rotate()
+        .resize(900, 900, { fit: 'inside', withoutEnlargement: true })
+        .png({ compressionLevel: 9, palette: true, quality: 80 })
+        .toBuffer();
+      if (smaller.length > 2_900_000) throw new Error('Normalized image exceeds storage limit');
+      return smaller;
+    }
+    return normalized;
   } catch (error) {
-    if (error instanceof HttpError) throw error;
-    throw new HttpError(400, 'Bill URL is invalid');
+    console.error('Farm image normalization failed:', error);
+    throw new HttpError(400, 'Could not read this image. Try another image format or a smaller image.');
   }
 }

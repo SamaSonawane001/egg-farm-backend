@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
   owner_name VARCHAR(120) NOT NULL,
   farm_name VARCHAR(160) NOT NULL,
   avatar_url TEXT,
+  signature_url TEXT,
+  payment_qr_url TEXT,
   address TEXT,
   low_stock_threshold NUMERIC(10,2) NOT NULL DEFAULT 10,
   kg_per_bag NUMERIC(10,2) NOT NULL DEFAULT 50,
@@ -23,6 +25,8 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS signature_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS payment_qr_url TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS eggs_per_tray INT NOT NULL DEFAULT 30;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_eggs_per_tray_check') THEN
@@ -62,6 +66,23 @@ CREATE TABLE IF NOT EXISTS feed_products (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_owner_name_ci ON feed_products(owner_id, lower(trim(name)));
 
+CREATE OR REPLACE FUNCTION create_owner_ready_feed() RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO feed_products(owner_id, name) VALUES (NEW.id, 'Ready Feed')
+  ON CONFLICT DO NOTHING;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS users_create_ready_feed ON users;
+CREATE TRIGGER users_create_ready_feed
+AFTER INSERT ON users
+FOR EACH ROW EXECUTE FUNCTION create_owner_ready_feed();
+
+INSERT INTO feed_products(owner_id, name)
+SELECT id, 'Ready Feed' FROM users
+ON CONFLICT DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS feed_purchases (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -69,7 +90,7 @@ CREATE TABLE IF NOT EXISTS feed_purchases (
   feed_type VARCHAR(120) NOT NULL,
   bags NUMERIC(12,5) NOT NULL CHECK (bags > 0),
   cost_per_bag NUMERIC(12,2) NOT NULL CHECK (cost_per_bag >= 0),
-  total_cost NUMERIC(14,2) GENERATED ALWAYS AS (bags * cost_per_bag) STORED,
+  total_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
   source VARCHAR(20) NOT NULL DEFAULT 'PURCHASE' CHECK (source IN ('PURCHASE','PROCESSING')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -80,6 +101,21 @@ DO $$ BEGIN
     ALTER TABLE feed_purchases ADD CONSTRAINT feed_purchases_source_check CHECK (source IN ('PURCHASE','PROCESSING'));
   END IF;
 END $$;
+
+ALTER TABLE feed_purchases ALTER COLUMN total_cost DROP EXPRESSION IF EXISTS;
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS entered_quantity NUMERIC(12,3);
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS entered_unit VARCHAR(10);
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS rate_per_unit NUMERIC(14,3);
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS kg_per_bag NUMERIC(8,3);
+UPDATE feed_purchases p
+SET entered_quantity=COALESCE(p.entered_quantity,p.bags),
+    entered_unit=COALESCE(p.entered_unit,'bags'),
+    rate_per_unit=COALESCE(p.rate_per_unit,p.cost_per_bag),
+    kg_per_bag=COALESCE(p.kg_per_bag,u.kg_per_bag,50),
+    total_cost=CASE WHEN p.total_cost=0 THEN ROUND(p.bags*p.cost_per_bag,2) ELSE p.total_cost END
+FROM users u
+WHERE p.owner_id=u.id
+  AND (p.entered_quantity IS NULL OR p.entered_unit IS NULL OR p.rate_per_unit IS NULL OR p.kg_per_bag IS NULL);
 
 CREATE TABLE IF NOT EXISTS raw_materials (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -110,6 +146,7 @@ CREATE TABLE IF NOT EXISTS raw_material_processing (
 
 ALTER TABLE raw_material_processing ADD COLUMN IF NOT EXISTS produced_quantity NUMERIC(12,3);
 ALTER TABLE raw_material_processing ADD COLUMN IF NOT EXISTS produced_unit VARCHAR(5);
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS processing_id UUID REFERENCES raw_material_processing(id) ON DELETE CASCADE;
 UPDATE raw_material_processing
 SET produced_quantity = quantity_bags, produced_unit = 'bags'
 WHERE produced_quantity IS NULL OR produced_unit IS NULL;
@@ -124,7 +161,7 @@ CREATE TABLE IF NOT EXISTS raw_material_logs (
   transaction_date DATE NOT NULL,
   supplier VARCHAR(160),
   rate_per_unit NUMERIC(14,3) CHECK (rate_per_unit IS NULL OR rate_per_unit >= 0),
-  total_amount NUMERIC(14,2) CHECK (total_amount IS NULL OR total_amount >= 0),
+  total_amount NUMERIC(18,2) CHECK (total_amount IS NULL OR total_amount >= 0),
   remarks TEXT,
   processing_id UUID REFERENCES raw_material_processing(id) ON DELETE CASCADE,
   bill_image_url TEXT,
@@ -138,10 +175,16 @@ ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS bill_number VARCHAR(100);
 ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(150);
 ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS entered_quantity NUMERIC(12,3);
 ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS entered_unit VARCHAR(30);
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS entered_kg_per_unit NUMERIC(12,3);
 
 UPDATE raw_material_logs
 SET entered_quantity = quantity, entered_unit = unit
 WHERE entered_quantity IS NULL OR entered_unit IS NULL;
+UPDATE raw_material_logs l
+SET entered_kg_per_unit=COALESCE(u.kg_per_bag,50)
+FROM raw_materials m JOIN users u ON u.id=m.owner_id
+WHERE l.owner_id=m.owner_id AND l.material_id=m.id
+  AND l.entered_unit='bags' AND l.entered_kg_per_unit IS NULL;
 
 UPDATE raw_material_logs l
 SET quantity = ROUND(
@@ -222,6 +265,15 @@ CREATE TABLE IF NOT EXISTS medicine_batches (
   remarks TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE medicine_batches ADD COLUMN IF NOT EXISTS entered_quantity NUMERIC(12,3);
+ALTER TABLE medicine_batches ADD COLUMN IF NOT EXISTS entered_unit VARCHAR(5);
+ALTER TABLE medicine_batches ADD COLUMN IF NOT EXISTS rate_per_unit NUMERIC(14,3);
+UPDATE medicine_batches
+SET entered_quantity=COALESCE(entered_quantity,received_quantity),
+    entered_unit=COALESCE(entered_unit,unit),
+    rate_per_unit=COALESCE(rate_per_unit,ROUND(total_cost/NULLIF(received_quantity,0),3))
+WHERE entered_quantity IS NULL OR entered_unit IS NULL OR rate_per_unit IS NULL;
 
 CREATE TABLE IF NOT EXISTS medicine_usage (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -344,9 +396,49 @@ CREATE TABLE IF NOT EXISTS feed_usage (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS feed_preparations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  feed_product_id UUID NOT NULL REFERENCES feed_products(id) ON DELETE RESTRICT,
+  preparation_date DATE NOT NULL,
+  total_quantity_kg NUMERIC(12,3) NOT NULL CHECK (total_quantity_kg > 0),
+  remarks TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS feed_preparation_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  preparation_id UUID NOT NULL REFERENCES feed_preparations(id) ON DELETE CASCADE,
+  feed_product_id UUID REFERENCES feed_products(id) ON DELETE RESTRICT,
+  raw_material_id UUID REFERENCES raw_materials(id) ON DELETE RESTRICT,
+  source_type VARCHAR(20) NOT NULL DEFAULT 'feed',
+  quantity_kg NUMERIC(12,3) NOT NULL CHECK (quantity_kg > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE feed_preparation_items ALTER COLUMN feed_product_id DROP NOT NULL;
+ALTER TABLE feed_preparation_items ADD COLUMN IF NOT EXISTS raw_material_id UUID REFERENCES raw_materials(id) ON DELETE RESTRICT;
+ALTER TABLE feed_preparation_items ADD COLUMN IF NOT EXISTS source_type VARCHAR(20) NOT NULL DEFAULT 'feed';
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='feed_preparation_items_source_check') THEN
+    ALTER TABLE feed_preparation_items ADD CONSTRAINT feed_preparation_items_source_check
+      CHECK (
+        (source_type='feed' AND feed_product_id IS NOT NULL AND raw_material_id IS NULL)
+        OR (source_type='raw_material' AND raw_material_id IS NOT NULL AND feed_product_id IS NULL)
+      );
+  END IF;
+END $$;
+
 ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS feed_type VARCHAR(120);
+ALTER TABLE feed_usage ALTER COLUMN quantity TYPE NUMERIC(12,3);
+ALTER TABLE feed_usage ALTER COLUMN bags_equivalent TYPE NUMERIC(12,5);
 ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS feed_product_id UUID REFERENCES feed_products(id) ON DELETE CASCADE;
 ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS feed_product_id UUID REFERENCES feed_products(id) ON DELETE CASCADE;
+ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS remarks TEXT;
+ALTER TABLE feed_usage ADD COLUMN IF NOT EXISTS preparation_id UUID REFERENCES feed_preparations(id) ON DELETE CASCADE;
+ALTER TABLE feed_purchases ADD COLUMN IF NOT EXISTS preparation_id UUID REFERENCES feed_preparations(id) ON DELETE CASCADE;
+ALTER TABLE raw_material_logs ADD COLUMN IF NOT EXISTS preparation_id UUID REFERENCES feed_preparations(id) ON DELETE CASCADE;
 
 -- Existing usage logs cannot be attributed across multiple feed types reliably.
 -- Backfill only where the owner's purchase history contains exactly one type.
@@ -440,15 +532,30 @@ CREATE TABLE IF NOT EXISTS invoices (
   customer_name VARCHAR(160) NOT NULL,
   customer_mobile VARCHAR(20),
   invoice_date DATE NOT NULL,
-  subtotal NUMERIC(14,2) NOT NULL,
+  subtotal NUMERIC(18,2) NOT NULL,
   tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
-  tax_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
-  grand_total NUMERIC(14,2) NOT NULL,
+  tax_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
+  grand_total NUMERIC(18,2) NOT NULL,
+  payment_status TEXT NOT NULL DEFAULT 'unpaid',
+  paid_at TIMESTAMPTZ,
+  customer_id UUID,
+  paid_amount NUMERIC(18,2) NOT NULL DEFAULT 0,
   notes TEXT,
   share_token UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (owner_id, invoice_year, invoice_seq)
 );
+
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'unpaid';
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='invoices_payment_status_check') THEN
+    ALTER TABLE invoices ADD CONSTRAINT invoices_payment_status_check
+      CHECK (payment_status IN ('paid','unpaid'));
+  END IF;
+END $$;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_id UUID;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS paid_amount NUMERIC(18,2) NOT NULL DEFAULT 0;
 
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_year INT;
 UPDATE invoices
@@ -465,8 +572,34 @@ CREATE TABLE IF NOT EXISTS invoice_items (
   description VARCHAR(255) NOT NULL,
   quantity NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
   unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
-  amount NUMERIC(14,2) NOT NULL,
+  amount NUMERIC(18,2) NOT NULL,
   egg_quantity INT CHECK (egg_quantity IS NULL OR egg_quantity > 0)
+);
+
+CREATE TABLE IF NOT EXISTS customers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(owner_id, phone),
+  UNIQUE(owner_id, id)
+);
+ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_customer_id_fkey;
+ALTER TABLE invoices ADD CONSTRAINT invoices_customer_id_fkey
+  FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS customer_payments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  invoice_id UUID REFERENCES invoices(id) ON DELETE SET NULL,
+  amount_paid NUMERIC(18,2) NOT NULL CHECK (amount_paid > 0),
+  payment_mode TEXT NOT NULL DEFAULT 'Cash'
+    CHECK (payment_mode IN ('Cash','UPI / Online','Bank Transfer')),
+  note TEXT,
+  payment_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_quantity INT;
@@ -498,6 +631,41 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+CREATE TABLE IF NOT EXISTS farm_expenses (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  category TEXT NOT NULL CHECK (category IN (
+    'farm_labour_salary',
+    'feed_truck_unloading_hamali',
+    'feed_mill_expense',
+    'electricity_water',
+    'transport_diesel',
+    'other_farm_expense'
+  )),
+  person_or_vendor TEXT,
+  description TEXT NOT NULL,
+  workers_count INT CHECK (workers_count IS NULL OR workers_count > 0),
+  amount NUMERIC(18,2) NOT NULL CHECK (amount > 0),
+  payment_mode TEXT NOT NULL DEFAULT 'Cash'
+    CHECK (payment_mode IN ('Cash','UPI / Online','Bank Transfer')),
+  expense_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE raw_material_logs
+  ALTER COLUMN total_amount TYPE NUMERIC(18,2) USING total_amount::numeric(18,2);
+ALTER TABLE invoices
+  ALTER COLUMN subtotal TYPE NUMERIC(18,2) USING subtotal::numeric(18,2),
+  ALTER COLUMN tax_amount TYPE NUMERIC(18,2) USING tax_amount::numeric(18,2),
+  ALTER COLUMN grand_total TYPE NUMERIC(18,2) USING grand_total::numeric(18,2),
+  ALTER COLUMN paid_amount TYPE NUMERIC(18,2) USING paid_amount::numeric(18,2);
+ALTER TABLE invoice_items
+  ALTER COLUMN amount TYPE NUMERIC(18,2) USING amount::numeric(18,2);
+ALTER TABLE customer_payments
+  ALTER COLUMN amount_paid TYPE NUMERIC(18,2) USING amount_paid::numeric(18,2);
+ALTER TABLE farm_expenses
+  ALTER COLUMN amount TYPE NUMERIC(18,2) USING amount::numeric(18,2);
+
 CREATE INDEX IF NOT EXISTS idx_flock_owner ON flock_batches(owner_id, arrival_date DESC);
 CREATE INDEX IF NOT EXISTS idx_mort_owner ON mortality_logs(owner_id, log_date DESC);
 CREATE INDEX IF NOT EXISTS idx_mort_batch ON mortality_logs(batch_id);
@@ -522,12 +690,21 @@ CREATE INDEX IF NOT EXISTS idx_feedu_owner ON feed_usage(owner_id, usage_date DE
 CREATE INDEX IF NOT EXISTS idx_feedu_owner_type ON feed_usage(owner_id, lower(trim(feed_type)));
 CREATE INDEX IF NOT EXISTS idx_feedu_product ON feed_usage(owner_id, feed_product_id, usage_date DESC);
 CREATE INDEX IF NOT EXISTS idx_feedu_batch ON feed_usage(batch_id);
+CREATE INDEX IF NOT EXISTS idx_feed_preparations_owner_date ON feed_preparations(owner_id, preparation_date DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_feed_preparation_items_batch ON feed_preparation_items(owner_id, preparation_id);
+CREATE INDEX IF NOT EXISTS idx_raw_material_logs_preparation ON raw_material_logs(owner_id, preparation_id);
 CREATE INDEX IF NOT EXISTS idx_egg_owner ON egg_production(owner_id, collection_date DESC);
 CREATE INDEX IF NOT EXISTS idx_egg_batch ON egg_production(batch_id);
 CREATE INDEX IF NOT EXISTS idx_inv_owner ON invoices(owner_id, invoice_date DESC);
 CREATE INDEX IF NOT EXISTS idx_inv_created_owner ON invoices(owner_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_invitems_inv ON invoice_items(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_invitems_owner_invoice ON invoice_items(owner_id, invoice_id);
+CREATE INDEX IF NOT EXISTS idx_farm_expenses_owner_date ON farm_expenses(owner_id, expense_date DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_customers_owner_name ON customers(owner_id, lower(name));
+CREATE INDEX IF NOT EXISTS idx_customer_payments_owner_customer_date
+  ON customer_payments(owner_id, customer_id, payment_date DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_customer_payments_invoice ON customer_payments(owner_id, invoice_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(owner_id, customer_id, invoice_date DESC);
 
 -- Row-Level-Security ready: policies key off the session setting app.owner_id.
 -- The API connects as the table owner (bypasses RLS) and filters by owner_id in every query.
@@ -536,7 +713,7 @@ CREATE INDEX IF NOT EXISTS idx_invitems_owner_invoice ON invoice_items(owner_id,
 DO $$
 DECLARE t TEXT;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage','egg_production','invoices','invoice_items','raw_materials','raw_material_processing','raw_material_logs','medicines','medicine_batches','medicine_usage','medicine_usage_allocations','medicine_logs']
+  FOREACH t IN ARRAY ARRAY['flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage','feed_preparations','feed_preparation_items','egg_production','invoices','invoice_items','farm_expenses','customers','customer_payments','raw_materials','raw_material_processing','raw_material_logs','medicines','medicine_batches','medicine_usage','medicine_usage_allocations','medicine_logs']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);

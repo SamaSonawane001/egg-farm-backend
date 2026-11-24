@@ -12,6 +12,7 @@ const body = z.object({
     'Please enter a valid 10-digit mobile number'
   ),
   invoice_date: dateStr,
+  payment_status: z.enum(['paid', 'unpaid']).default('unpaid'),
   tax_percent: z.coerce.number().min(0).max(100).default(0),
   notes: optText,
   items: z
@@ -57,16 +58,36 @@ const body = z.object({
     }
   });
 });
-function sendPdf(res: Response, buffer: Buffer, invoiceNo: string) {
+function pdfFileName(farmName: string | null, customerName: string | null) {
+  const safePart = (value: string | null, fallback: string) =>
+    value?.trim().replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') ||
+    fallback;
+  return `${safePart(farmName, 'Farm')}_${safePart(customerName, 'Customer')}_Invoice.pdf`;
+}
+
+function sendPdf(res: Response, buffer: Buffer, fileName: string) {
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${invoiceNo}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
   res.send(buffer);
 }
 
 export const list = asyncHandler(async (req, res) => {
-  const { page, limit, offset } = parsePagination(req.query);
+  const { page, limit, offset } = parsePagination({
+    ...req.query,
+    limit: req.query.limit ?? 10,
+  });
   const result = await svc.list(req.ownerId, limit, offset);
   okPaginated(res, result.data, paginationMetadata(result.total, page, limit, offset));
+});
+export const paymentSummary = asyncHandler(async (req, res) =>
+  ok(res, await svc.paymentSummary(req.ownerId)));
+export const updatePaymentStatus = asyncHandler(async (req, res) => {
+  const body = z.object({ payment_status: z.enum(['paid', 'unpaid']) }).parse(req.body);
+  ok(res, await svc.updatePaymentStatus(
+    req.ownerId,
+    idParam(req.params.id),
+    body.payment_status,
+  ));
 });
 export const getOne = asyncHandler(async (req, res) => ok(res, await svc.getOne(req.ownerId, idParam(req.params.id))));
 export const create = asyncHandler(async (req, res) => ok(res, await svc.create(req.ownerId, body.parse(req.body)), 201));
@@ -75,10 +96,10 @@ export const remove = asyncHandler(async (req, res) => {
   ok(res, { deleted: true });
 });
 export const pdf = asyncHandler(async (req, res) => {
-  const { buffer, invoice } = await svc.pdfFor(req.ownerId, idParam(req.params.id));
-  sendPdf(res, buffer, invoice.invoice_no);
+  const { buffer, invoice, farm } = await svc.pdfFor(req.ownerId, idParam(req.params.id));
+  sendPdf(res, buffer, pdfFileName(farm.farm_name, invoice.customer_name));
 });
 export const publicPdf = asyncHandler(async (req, res) => {
-  const { buffer, invoice } = await svc.pdfByToken(req.params.token);
-  sendPdf(res, buffer, invoice.invoice_no);
+  const { buffer, invoice, farm } = await svc.pdfByPublicIdOrToken(req.params.id);
+  sendPdf(res, buffer, pdfFileName(farm.farm_name, invoice.customer_name));
 });

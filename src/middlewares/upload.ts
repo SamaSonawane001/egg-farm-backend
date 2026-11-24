@@ -50,6 +50,54 @@ const profileAvatarParser = multer({
   },
 }).single('avatar');
 
+const profileAssetExtensions = new Set([
+  '.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif', '.bmp',
+  '.gif', '.tif', '.tiff', '.avif',
+]);
+const profileAssetParser = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024, files: 1, fields: 4, parts: 5 },
+  fileFilter: (_req, file, cb) => {
+    const mimeType = (file.mimetype || '').toLowerCase();
+    const extension = path.extname(file.originalname).toLowerCase();
+    if (
+      mimeType.startsWith('image/') ||
+      mimeType === 'application/octet-stream' ||
+      profileAssetExtensions.has(extension)
+    ) {
+      cb(null, true);
+    } else {
+      cb(new HttpError(400, 'Please select an image file') as any);
+    }
+  },
+}).single('image');
+
+export const uploadProfileAsset = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  profileAssetParser(req, res, (error) => {
+    if (!error) {
+      next();
+      return;
+    }
+
+    console.error('Farm image upload failed:', error);
+    const status = error instanceof HttpError
+      ? error.status
+      : error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE'
+        ? 413
+        : error instanceof multer.MulterError
+          ? 400
+          : 500;
+    res.status(status).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Farm image upload failed',
+    });
+  });
+};
+
 export const uploadProfileAvatar = (
   req: Request,
   res: Response,
@@ -73,35 +121,5 @@ export const uploadProfileAvatar = (
       success: false,
       error: error instanceof Error ? error.message : 'Avatar upload failed',
     });
-  });
-};
-
-const billUploadParser = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 15 * 1024 * 1024,
-    files: 1,
-    fields: 1,
-    fieldSize: 32,
-    parts: 2,
-  },
-  fileFilter: (_req, _file, cb) => cb(null, true),
-});
-
-export const uploadBill = (req: Request, res: Response, next: NextFunction) => {
-  billUploadParser.single('file')(req, res, (error) => {
-    if (!error) {
-      next();
-      return;
-    }
-    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-      res.status(413).json({
-        success: false,
-        message: 'File exceeds 15MB limit',
-        error: 'File exceeds 15MB limit',
-      });
-      return;
-    }
-    next(error);
   });
 };

@@ -27,6 +27,10 @@ export async function getDashboard(ownerId: string, today: string) {
          SELECT m.total_cost
          FROM medicine_batches m, period p
          WHERE m.owner_id=$1 AND m.received_date >= p.start_date AND m.received_date < p.end_date
+         UNION ALL
+         SELECT e.amount
+         FROM farm_expenses e, period p
+         WHERE e.owner_id=$1 AND e.expense_date >= p.start_date AND e.expense_date < p.end_date
        ),
        week AS (
          SELECT to_char(d::date,'YYYY-MM-DD') AS date,
@@ -41,8 +45,25 @@ export async function getDashboard(ownerId: string, today: string) {
            - COALESCE((SELECT SUM(dead_count) FROM mortality_logs WHERE owner_id=$1),0) AS active_birds,
          COALESCE((SELECT SUM(net_eggs) FROM egg_production
                    WHERE owner_id=$1 AND collection_date=$2::date),0) AS today_eggs,
-         COALESCE((SELECT SUM(i.grand_total) FROM invoices i, period p
-                   WHERE i.owner_id=$1 AND i.invoice_date >= p.start_date AND i.invoice_date < p.end_date),0) AS month_revenue,
+         COALESCE((SELECT SUM(cp.amount_paid) FROM customer_payments cp, period p
+                   WHERE cp.owner_id=$1 AND cp.payment_date >= p.start_date
+                     AND cp.payment_date < p.end_date),0)
+         + COALESCE((SELECT SUM(i.grand_total) FROM invoices i, period p
+                     WHERE i.owner_id=$1 AND i.customer_id IS NULL
+                       AND i.payment_status='paid'
+                       AND COALESCE(i.paid_at,i.invoice_date::timestamptz) >= p.start_date
+                       AND COALESCE(i.paid_at,i.invoice_date::timestamptz) < p.end_date),0)
+           AS month_revenue,
+         COALESCE((SELECT SUM(GREATEST(billed-paid,0)) FROM (
+                     SELECT COALESCE(SUM(i.grand_total),0) AS billed,
+                            COALESCE((SELECT SUM(cp.amount_paid) FROM customer_payments cp
+                                      WHERE cp.owner_id=c.owner_id AND cp.customer_id=c.id),0) AS paid
+                     FROM customers c
+                     LEFT JOIN invoices i ON i.owner_id=c.owner_id AND i.customer_id=c.id
+                     WHERE c.owner_id=$1 GROUP BY c.id
+                   ) balances),0)
+         + COALESCE((SELECT SUM(GREATEST(i.grand_total-i.paid_amount,0)) FROM invoices i
+                     WHERE i.owner_id=$1 AND i.customer_id IS NULL),0) AS pending_payments,
          COALESCE((SELECT SUM(amount) FROM expense_rows),0) AS month_expense,
          (SELECT COUNT(*) FROM expense_rows) AS month_expense_records,
          (SELECT start_date::text FROM period) AS expense_period_start,
@@ -69,6 +90,7 @@ export async function getDashboard(ownerId: string, today: string) {
     feed_low_stock: stock.low_stock,
     feed_threshold: stock.threshold,
     month_revenue: Number(summary.month_revenue),
+    pending_payments: Number(summary.pending_payments),
     month_expense: Number(summary.month_expense),
     month_profit: Number(summary.month_revenue) - Number(summary.month_expense),
     last7_eggs: summary.last7_eggs,

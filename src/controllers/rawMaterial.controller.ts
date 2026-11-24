@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { asyncHandler, dateStr, idParam, ok, optText } from '../utils/http';
 import { HttpError } from '../utils/httpError';
 import * as svc from '../services/rawMaterial.service';
-import { assertTenantBillUrl } from '../services/storage.service';
 
 const calendarDate = dateStr.refine((v) => {
   const parsed = new Date(`${v}T00:00:00.000Z`);
@@ -24,9 +23,9 @@ const inwardBody = z.object({
   supplier: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().trim().max(160).nullable()),
   vendor_name: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().trim().max(150).nullable()),
   rate_per_unit: nonnegative3,
-  total_amount: amount2,
+  total_amount: amount2.optional(),
+  kg_per_bag: z.coerce.number().positive().optional(),
   remarks: optText,
-  bill_image_url: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().url().max(2048).nullable()),
   bill_number: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().trim().max(100).nullable()),
 }).superRefine((body, context) => {
   if (!body.material_id && !body.material_name) {
@@ -40,6 +39,24 @@ const processingBody = z.object({
   unit: z.enum(['kg', 'quintal', 'bags']),
   remarks: optText,
 });
+const inwardUpdateBody = z.object({
+  quantity: quantity3.optional(),
+  unit: z.enum(['kg', 'quintal', 'bags']).optional(),
+  date: calendarDate.optional(),
+  supplier: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().trim().max(160).nullable()).optional(),
+  vendor_name: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().trim().max(150).nullable()).optional(),
+  rate_per_unit: nonnegative3.optional(),
+  total_amount: amount2.optional(),
+  kg_per_bag: z.coerce.number().positive().optional(),
+  remarks: optText.optional(),
+  bill_number: z.preprocess((v) => (v === '' || v === undefined ? null : v), z.string().trim().max(100).nullable()).optional(),
+}).refine((body) => Object.keys(body).length > 0, 'At least one field is required');
+const usageUpdateBody = z.object({
+  date: calendarDate.optional(),
+  quantity: quantity3.optional(),
+  unit: z.enum(['kg', 'quintal', 'bags']).optional(),
+  remarks: optText.optional(),
+}).refine((body) => Object.keys(body).length > 0, 'At least one field is required');
 const dateFilters = z.object({
   from: z.preprocess((v) => (v === '' ? undefined : v), calendarDate.optional()),
   to: z.preprocess((v) => (v === '' ? undefined : v), calendarDate.optional()),
@@ -69,7 +86,6 @@ export const remove = asyncHandler(async (req, res) => {
 });
 export const inward = asyncHandler(async (req, res) => {
   const body = inwardBody.parse(req.body);
-  assertTenantBillUrl(req.ownerId, 'raw_materials', body.bill_image_url);
   ok(res, await svc.receiveMaterial(req.ownerId, body), 201);
 });
 export const logs = asyncHandler(async (req, res) => {
@@ -79,3 +95,19 @@ export const logs = asyncHandler(async (req, res) => {
 export const processing = asyncHandler(async (req, res) => ok(res, await svc.listProcessing(req.ownerId)));
 export const createProcessing = asyncHandler(async (req, res) =>
   ok(res, await svc.processMaterials(req.ownerId, processingBody.parse(req.body)), 201));
+export const updateInward = asyncHandler(async (req, res) =>
+  ok(res, await svc.updateInward(req.ownerId, idParam(req.params.id), inwardUpdateBody.parse(req.body))));
+export const removeInward = asyncHandler(async (req, res) => {
+  await svc.deleteInward(req.ownerId, idParam(req.params.id));
+  ok(res, { deleted: true });
+});
+export const updateUsage = asyncHandler(async (req, res) =>
+  ok(res, await svc.updateUsage(req.ownerId, idParam(req.params.id), usageUpdateBody.parse(req.body))));
+export const removeUsage = asyncHandler(async (req, res) => {
+  await svc.deleteUsage(req.ownerId, idParam(req.params.id));
+  ok(res, { deleted: true });
+});
+export const removeProcessing = asyncHandler(async (req, res) => {
+  await svc.deleteProcessing(req.ownerId, idParam(req.params.id));
+  ok(res, { deleted: true });
+});

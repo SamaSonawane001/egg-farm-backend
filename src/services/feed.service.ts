@@ -4,17 +4,19 @@ import { HttpError } from '../utils/httpError';
 import { ensureBatch } from './flock.service';
 
 export async function getStock(ownerId: string) {
+  await ensureReadyFeed(ownerId);
   const [totals, feeds, settings] = await Promise.all([
     query(
-      `SELECT COALESCE((SELECT SUM(bags) FROM feed_purchases WHERE owner_id=$1),0) AS purchased,
-              COALESCE((SELECT SUM(bags_equivalent) FROM feed_usage WHERE owner_id=$1),0) AS consumed`,
+      `SELECT COALESCE((SELECT SUM(bags) FROM feed_purchases WHERE owner_id=$1 AND preparation_id IS NULL),0) AS purchased,
+              COALESCE((SELECT SUM(bags_equivalent) FROM feed_usage WHERE owner_id=$1 AND preparation_id IS NULL),0) AS consumed`,
       [ownerId]
     ),
     query(
       `SELECT fp.id, fp.name AS feed_type,
               COALESCE((SELECT SUM(p.bags) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS purchased,
               COALESCE((SELECT SUM(u.bags_equivalent) FROM feed_usage u WHERE u.owner_id=fp.owner_id AND u.feed_product_id=fp.id),0) AS consumed
-       FROM feed_products fp WHERE fp.owner_id=$1 ORDER BY lower(fp.name), fp.id`,
+       FROM feed_products fp WHERE fp.owner_id=$1
+       ORDER BY CASE WHEN lower(trim(fp.name))='ready feed' THEN 0 ELSE 1 END, lower(fp.name), fp.id`,
       [ownerId]
     ),
     query('SELECT low_stock_threshold AS threshold, kg_per_bag FROM users WHERE id=$1', [ownerId]),
@@ -55,15 +57,19 @@ export const listPurchases = async (ownerId: string, limit = 20, offset = 0) => 
   return { data, total: Number(count[0].total) };
 };
 
-export const listProducts = (ownerId: string) =>
-  query(
+export const listProducts = async (ownerId: string) => {
+  await ensureReadyFeed(ownerId);
+  const rows = await query(
     `SELECT fp.id, fp.name,
             COALESCE((SELECT SUM(p.bags) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS purchased_bags,
             COALESCE((SELECT SUM(u.bags_equivalent) FROM feed_usage u WHERE u.owner_id=fp.owner_id AND u.feed_product_id=fp.id),0) AS consumed_bags,
             COALESCE((SELECT SUM(p.total_cost) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS total_spent
-     FROM feed_products fp WHERE fp.owner_id=$1 ORDER BY lower(fp.name), fp.id`,
+     FROM feed_products fp WHERE fp.owner_id=$1
+     ORDER BY CASE WHEN lower(trim(fp.name))='ready feed' THEN 0 ELSE 1 END, lower(fp.name), fp.id`,
     [ownerId]
-  ).then((rows) => rows.map((row) => ({ ...row, remaining_bags: row.purchased_bags - row.consumed_bags })));
+  );
+  return rows.map((row) => ({ ...row, remaining_bags: row.purchased_bags - row.consumed_bags }));
+};
 
 export async function getProductDetail(
   ownerId: string,
@@ -146,6 +152,9 @@ export async function getProductDetail(
 }
 
 export async function createProduct(ownerId: string, name: string) {
+  if (name.trim().toLowerCase() === 'ready feed') {
+    throw new HttpError(409, 'Ready Feed is a permanent system product');
+  }
   const rows = await query(
     'INSERT INTO feed_products(owner_id,name) VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING id,name',
     [ownerId, name.trim()]
@@ -157,11 +166,21 @@ export async function createProduct(ownerId: string, name: string) {
 export async function updateProduct(ownerId: string, id: string, name: string) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
+    if (name.trim().toLowerCase() === 'ready feed') {
+      throw new HttpError(409, 'A permanent Ready Feed system product already exists');
+    }
+    const existing = await client.query(
+      'SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+      [id, ownerId],
+    );
+    if (!existing.rows.length) throw new HttpError(404, 'Feed product not found');
+    if (existing.rows[0].name.trim().toLowerCase() === 'ready feed') {
+      throw new HttpError(400, 'Ready Feed is a permanent system product and cannot be renamed');
+    }
     const updated = await client.query(
       'UPDATE feed_products SET name=$3 WHERE id=$1 AND owner_id=$2 RETURNING id,name',
       [id, ownerId, name.trim()]
     );
-    if (!updated.rows.length) throw new HttpError(404, 'Feed product not found');
     await client.query('UPDATE feed_purchases SET feed_type=$3 WHERE owner_id=$2 AND feed_product_id=$1', [id, ownerId, name.trim()]);
     await client.query('UPDATE feed_usage SET feed_type=$3 WHERE owner_id=$2 AND feed_product_id=$1', [id, ownerId, name.trim()]);
     return updated.rows[0];
@@ -171,12 +190,42 @@ export async function updateProduct(ownerId: string, id: string, name: string) {
 export async function deleteProduct(ownerId: string, id: string) {
   await withTx(async (client) => {
     await lockOwner(client, ownerId);
+    const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [id, ownerId]);
+    if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
+    if (product.rows[0].name.trim().toLowerCase() === 'ready feed') {
+      throw new HttpError(400, 'Ready Feed is a permanent system product and cannot be deleted');
+    }
     const rows = await client.query('DELETE FROM feed_products WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);
-    if (!rows.rows.length) throw new HttpError(404, 'Feed product not found');
   });
 }
 
 const lockOwner = (client: PoolClient, ownerId: string) => client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+
+async function ensureReadyFeedInTx(client: PoolClient, ownerId: string) {
+  const result = await client.query(
+    `INSERT INTO feed_products(owner_id,name)
+     VALUES($1,'Ready Feed')
+     ON CONFLICT DO NOTHING
+     RETURNING id,name`,
+    [ownerId],
+  );
+  if (result.rows.length) return result.rows[0];
+  const existing = await client.query(
+    `SELECT id,name FROM feed_products
+     WHERE owner_id=$1 AND lower(trim(name))='ready feed'
+     FOR UPDATE`,
+    [ownerId],
+  );
+  if (!existing.rows.length) throw new HttpError(500, 'Could not create or find Ready Feed');
+  return existing.rows[0];
+}
+
+async function ensureReadyFeed(ownerId: string) {
+  return withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    return ensureReadyFeedInTx(client, ownerId);
+  });
+}
 
 async function remainingForProduct(
   client: PoolClient,
@@ -207,10 +256,29 @@ export async function createPurchase(ownerId: string, d: any) {
     await lockOwner(client, ownerId);
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
     if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
+    if (product.rows[0].name.trim().toLowerCase() === 'ready feed') {
+      throw new HttpError(400, 'Ready Feed stock is added only through preparation batches');
+    }
+    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50) || 50;
+    const enteredUnit = d.unit ?? 'bags';
+    const enteredQuantity = Number(d.quantity ?? d.bags);
+    const enteredRate = Number(d.rate_per_unit ?? d.cost_per_bag);
+    const quantityKg = enteredUnit === 'quintal'
+      ? enteredQuantity * 100
+      : enteredUnit === 'kg'
+        ? enteredQuantity
+        : enteredQuantity * kgPerBag;
+    const bags = Math.round((quantityKg / kgPerBag) * 100000) / 100000;
+    const totalCost = Math.round(enteredQuantity * enteredRate * 100) / 100;
+    const costPerBag = bags > 0 ? Math.round((totalCost / bags) * 100) / 100 : 0;
     const r = await client.query(
-      `INSERT INTO feed_purchases (owner_id,feed_product_id,delivery_date,feed_type,bags,cost_per_bag)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [ownerId, d.feed_product_id, d.delivery_date, product.rows[0].name, d.bags, d.cost_per_bag]
+      `INSERT INTO feed_purchases
+       (owner_id,feed_product_id,delivery_date,feed_type,bags,cost_per_bag,total_cost,
+        entered_quantity,entered_unit,rate_per_unit,kg_per_bag)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [ownerId, d.feed_product_id, d.delivery_date, product.rows[0].name,
+        bags, costPerBag, totalCost, enteredQuantity, enteredUnit, enteredRate, kgPerBag]
     );
     return r.rows[0];
   });
@@ -225,17 +293,36 @@ export async function updatePurchase(ownerId: string, id: string, d: any) {
     if (old.source === 'PROCESSING') throw new HttpError(400, 'Feed created by raw-material processing cannot be edited');
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
     if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
+    if (product.rows[0].name.trim().toLowerCase() === 'ready feed') {
+      throw new HttpError(400, 'Ready Feed stock is added only through preparation batches');
+    }
+    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? old.kg_per_bag ?? 50) || 50;
+    const enteredUnit = d.unit ?? 'bags';
+    const enteredQuantity = Number(d.quantity ?? d.bags);
+    const enteredRate = Number(d.rate_per_unit ?? d.cost_per_bag);
+    const quantityKg = enteredUnit === 'quintal'
+      ? enteredQuantity * 100
+      : enteredUnit === 'kg'
+        ? enteredQuantity
+        : enteredQuantity * kgPerBag;
+    const bags = Math.round((quantityKg / kgPerBag) * 100000) / 100000;
+    const totalCost = Math.round(enteredQuantity * enteredRate * 100) / 100;
+    const costPerBag = bags > 0 ? Math.round((totalCost / bags) * 100) / 100 : 0;
     const remaining = await remainingForProduct(client, ownerId, old.feed_product_id, undefined, id);
-    if (old.feed_product_id === d.feed_product_id && remaining + d.bags < 0) {
+    if (old.feed_product_id === d.feed_product_id && remaining + bags < 0) {
       throw new HttpError(400, 'This change would make feed stock negative');
     }
     if (old.feed_product_id !== d.feed_product_id && remaining < 0) {
       throw new HttpError(400, 'This change would leave used feed without enough stock');
     }
     const r = await client.query(
-      `UPDATE feed_purchases SET delivery_date=$3, feed_product_id=$4, feed_type=$5, bags=$6, cost_per_bag=$7
+      `UPDATE feed_purchases SET delivery_date=$3, feed_product_id=$4, feed_type=$5,
+       bags=$6,cost_per_bag=$7,total_cost=$8,entered_quantity=$9,entered_unit=$10,
+       rate_per_unit=$11,kg_per_bag=$12
        WHERE id=$1 AND owner_id=$2 RETURNING *`,
-      [id, ownerId, d.delivery_date, d.feed_product_id, product.rows[0].name, d.bags, d.cost_per_bag]
+      [id, ownerId, d.delivery_date, d.feed_product_id, product.rows[0].name, bags,
+        costPerBag, totalCost, enteredQuantity, enteredUnit, enteredRate, kgPerBag]
     );
     return r.rows[0];
   });
@@ -289,8 +376,9 @@ export async function updateUsage(ownerId: string, id: string, d: any) {
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
-    const existing = await client.query('SELECT id FROM feed_usage WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
+    const existing = await client.query('SELECT id,preparation_id FROM feed_usage WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
     if (!existing.rows.length) throw new HttpError(404, 'Feed usage log not found');
+    if (existing.rows[0].preparation_id) throw new HttpError(400, 'Ready Feed transfer usage can only be changed by editing its preparation batch');
     const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
     if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
@@ -309,7 +397,300 @@ export async function updateUsage(ownerId: string, id: string, d: any) {
 export async function deleteUsage(ownerId: string, id: string) {
   await withTx(async (client) => {
     await lockOwner(client, ownerId);
-    const r = await client.query('DELETE FROM feed_usage WHERE id=$1 AND owner_id=$2 RETURNING id', [id, ownerId]);
-    if (!r.rows.length) throw new HttpError(404, 'Feed usage log not found');
+    const existing = await client.query(
+      'SELECT preparation_id FROM feed_usage WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+      [id, ownerId],
+    );
+    if (!existing.rows.length) throw new HttpError(404, 'Feed usage log not found');
+    if (existing.rows[0].preparation_id) throw new HttpError(400, 'Ready Feed transfer usage can only be changed by editing its preparation batch');
+    await client.query('DELETE FROM feed_usage WHERE id=$1 AND owner_id=$2', [id, ownerId]);
+  });
+}
+
+export async function getReadyFeedDetail(ownerId: string) {
+  const ready = await ensureReadyFeed(ownerId);
+  const settings = await query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+  const kgPerBag = Number(settings[0]?.kg_per_bag ?? 50) || 50;
+  const [products, preparations, usage] = await Promise.all([
+    listProducts(ownerId),
+    query(
+      `SELECT p.id,p.preparation_date,p.total_quantity_kg,p.remarks,p.created_at,
+              COALESCE(json_agg(json_build_object(
+                'source_type',i.source_type,
+                'item_id',COALESCE(i.feed_product_id,i.raw_material_id),
+                'feed_product_id',i.feed_product_id,
+                'material_id',i.raw_material_id,
+                'feed_name',COALESCE(fp.name,rm.name),
+                'quantity_kg',i.quantity_kg
+              ) ORDER BY COALESCE(fp.name,rm.name)) FILTER (WHERE i.id IS NOT NULL),'[]'::json) AS ingredients
+       FROM feed_preparations p
+       LEFT JOIN feed_preparation_items i ON i.preparation_id=p.id AND i.owner_id=p.owner_id
+       LEFT JOIN feed_products fp ON fp.id=i.feed_product_id AND fp.owner_id=i.owner_id
+       LEFT JOIN raw_materials rm ON rm.id=i.raw_material_id AND rm.owner_id=i.owner_id
+       WHERE p.owner_id=$1 AND p.feed_product_id=$2
+       GROUP BY p.id
+       ORDER BY p.preparation_date DESC,p.id DESC`,
+      [ownerId, ready.id],
+    ),
+    query(
+      `SELECT u.*,b.batch_name
+       FROM feed_usage u LEFT JOIN flock_batches b ON b.id=u.batch_id
+       WHERE u.owner_id=$1 AND u.feed_product_id=$2 AND u.preparation_id IS NULL
+       ORDER BY u.usage_date DESC,u.id DESC LIMIT 50`,
+      [ownerId, ready.id],
+    ),
+  ]);
+  const readyProduct = products.find((product) => product.id === ready.id);
+  if (!readyProduct) throw new HttpError(500, 'Ready Feed stock could not be loaded');
+  return {
+    product: readyProduct,
+    kg_per_bag: kgPerBag,
+    source_products: products.filter((product) => product.id !== ready.id),
+    preparations,
+    usage,
+  };
+}
+
+type ReadyFeedIngredient = {
+  source_type: 'feed' | 'raw_material';
+  item_id: string;
+  quantity_kg?: number;
+  quantity?: number;
+  unit?: 'kg' | 'bags';
+};
+
+async function saveReadyFeedPreparation(
+  client: PoolClient,
+  ownerId: string,
+  readyFeedId: string,
+  kgPerBag: number,
+  d: { date?: string; ingredients: ReadyFeedIngredient[] },
+  preparationId?: string,
+) {
+  const previous = preparationId
+    ? await client.query(
+        'SELECT * FROM feed_preparations WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+        [preparationId, ownerId],
+      )
+    : { rows: [] as any[] };
+  if (preparationId && !previous.rows.length) throw new HttpError(404, 'Ready Feed preparation not found');
+  if (previous.rows.length && previous.rows[0].feed_product_id !== readyFeedId) {
+    throw new HttpError(400, 'Preparation does not belong to Ready Feed');
+  }
+
+  const oldUsage = preparationId
+    ? await client.query(
+        `SELECT feed_product_id,SUM(bags_equivalent) AS bags
+         FROM feed_usage WHERE owner_id=$1 AND preparation_id=$2
+         GROUP BY feed_product_id`,
+        [ownerId, preparationId],
+      )
+    : { rows: [] as any[] };
+  const oldBagsByProduct = new Map<string, number>(
+    oldUsage.rows.map((row: any) => [row.feed_product_id, Number(row.bags)]),
+  );
+  const oldRawUsage = preparationId
+    ? await client.query(
+        `SELECT material_id,SUM(quantity) AS quantity_kg
+         FROM raw_material_logs
+         WHERE owner_id=$1 AND preparation_id=$2 AND transaction_type='OUTWARD_PROCESSING'
+         GROUP BY material_id`,
+        [ownerId, preparationId],
+      )
+    : { rows: [] as any[] };
+  const oldRawByMaterial = new Map<string, number>(
+    oldRawUsage.rows.map((row: any) => [row.material_id, Number(row.quantity_kg)]),
+  );
+  const ingredients = new Map<string, { sourceType: 'feed' | 'raw_material'; itemId: string; quantityKg: number }>();
+  for (const ingredient of d.ingredients) {
+    const quantityKg = ingredient.quantity_kg != null
+      ? Number(ingredient.quantity_kg)
+      : ingredient.unit === 'bags'
+        ? Number(ingredient.quantity) * kgPerBag
+        : Number(ingredient.quantity);
+    const roundedKg = Math.round(quantityKg * 1000) / 1000;
+    if (!Number.isFinite(roundedKg) || roundedKg <= 0) {
+      throw new HttpError(400, 'Ingredient quantities must be positive');
+    }
+    const key = `${ingredient.source_type}:${ingredient.item_id}`;
+    const current = ingredients.get(key);
+    ingredients.set(key, {
+      sourceType: ingredient.source_type,
+      itemId: ingredient.item_id,
+      quantityKg: Math.round(((current?.quantityKg ?? 0) + roundedKg) * 1000) / 1000,
+    });
+  }
+  if (!ingredients.size) throw new HttpError(400, 'Add at least one ingredient');
+  const totalKg = Math.round(Array.from(ingredients.values()).reduce((sum, ingredient) => sum + ingredient.quantityKg, 0) * 1000) / 1000;
+  const totalBags = Math.round((totalKg / kgPerBag) * 100000) / 100000;
+  if (!Number.isFinite(totalBags) || totalBags <= 0) throw new HttpError(400, 'Ready Feed quantity is too small');
+
+  const sourceRows: Array<{ sourceType: 'feed' | 'raw_material'; id: string; name: string; quantityKg: number }> = [];
+  for (const ingredient of ingredients.values()) {
+    if (ingredient.sourceType === 'feed') {
+      const product = await client.query(
+        'SELECT id,name FROM feed_products WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+        [ingredient.itemId, ownerId],
+      );
+      if (!product.rows.length) throw new HttpError(404, 'Source feed product not found');
+      if (product.rows[0].name.trim().toLowerCase() === 'ready feed') {
+        throw new HttpError(400, 'Ready Feed cannot be used as its own ingredient');
+      }
+      const remaining = await remainingForProduct(client, ownerId, ingredient.itemId);
+      const restored = oldBagsByProduct.get(ingredient.itemId) ?? 0;
+      const availableKg = (remaining + restored) * kgPerBag;
+      if (ingredient.quantityKg - availableKg > 0.0005) {
+        throw new HttpError(400, `Not enough ${product.rows[0].name} in stock (${Math.max(0, availableKg)} kg available)`);
+      }
+      sourceRows.push({
+        sourceType: 'feed',
+        id: ingredient.itemId,
+        name: product.rows[0].name,
+        quantityKg: ingredient.quantityKg,
+      });
+    } else {
+      const material = await client.query(
+        'SELECT id,name,unit FROM raw_materials WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+        [ingredient.itemId, ownerId],
+      );
+      if (!material.rows.length) throw new HttpError(404, 'Source raw material not found');
+      if (material.rows[0].unit !== 'kg') {
+        throw new HttpError(500, 'Raw material has not been migrated to kilogram stock');
+      }
+      const stock = await client.query(
+        `SELECT COALESCE(SUM(CASE WHEN transaction_type='INWARD' THEN quantity ELSE -quantity END),0) AS balance
+         FROM raw_material_logs WHERE owner_id=$1 AND material_id=$2`,
+        [ownerId, ingredient.itemId],
+      );
+      const availableKg = Number(stock.rows[0].balance) + (oldRawByMaterial.get(ingredient.itemId) ?? 0);
+      if (ingredient.quantityKg - availableKg > 0.0005) {
+        throw new HttpError(400, `Not enough ${material.rows[0].name} in stock (${Math.max(0, availableKg)} kg available)`);
+      }
+      sourceRows.push({
+        sourceType: 'raw_material',
+        id: ingredient.itemId,
+        name: material.rows[0].name,
+        quantityKg: ingredient.quantityKg,
+      });
+    }
+  }
+
+  const currentReady = await remainingForProduct(client, ownerId, readyFeedId);
+  const oldReadyPurchase = preparationId
+    ? await client.query(
+        'SELECT COALESCE(SUM(bags),0) AS bags FROM feed_purchases WHERE owner_id=$1 AND preparation_id=$2',
+        [ownerId, preparationId],
+      )
+    : { rows: [{ bags: 0 }] };
+  const readyAfterReplacement =
+    currentReady + totalBags - Number(oldReadyPurchase.rows[0].bags);
+  if (readyAfterReplacement < -0.000005) {
+    throw new HttpError(400, 'This change would remove Ready Feed that has already been consumed');
+  }
+
+  const date = d.date
+    ?? (previous.rows[0]
+      ? String(previous.rows[0].preparation_date).slice(0, 10)
+      : new Date().toISOString().slice(0, 10));
+  const description = `Prepared ${totalKg} kg (${sourceRows.map((row) => `${row.quantityKg} kg ${row.name}`).join(' + ')})`;
+  let batchId = preparationId;
+  if (preparationId) {
+    await client.query('DELETE FROM feed_usage WHERE owner_id=$1 AND preparation_id=$2', [ownerId, preparationId]);
+    await client.query('DELETE FROM feed_purchases WHERE owner_id=$1 AND preparation_id=$2', [ownerId, preparationId]);
+    await client.query('DELETE FROM raw_material_logs WHERE owner_id=$1 AND preparation_id=$2', [ownerId, preparationId]);
+    await client.query('DELETE FROM feed_preparation_items WHERE owner_id=$1 AND preparation_id=$2', [ownerId, preparationId]);
+    await client.query(
+      `UPDATE feed_preparations SET preparation_date=$3,total_quantity_kg=$4,remarks=$5
+       WHERE id=$1 AND owner_id=$2`,
+      [preparationId, ownerId, date, totalKg, description],
+    );
+  } else {
+    const batch = await client.query(
+      `INSERT INTO feed_preparations(owner_id,feed_product_id,preparation_date,total_quantity_kg,remarks)
+       VALUES($1,$2,$3,$4,$5) RETURNING id`,
+      [ownerId, readyFeedId, date, totalKg, description],
+    );
+    batchId = batch.rows[0].id;
+  }
+  for (const source of sourceRows) {
+    if (source.sourceType === 'feed') {
+      const bagsEquivalent = Math.round((source.quantityKg / kgPerBag) * 100000) / 100000;
+      await client.query(
+        `INSERT INTO feed_preparation_items(owner_id,preparation_id,source_type,feed_product_id,quantity_kg)
+         VALUES($1,$2,'feed',$3,$4)`,
+        [ownerId, batchId, source.id, source.quantityKg],
+      );
+      await client.query(
+        `INSERT INTO feed_usage
+         (owner_id,usage_date,quantity,unit,bags_equivalent,feed_type,feed_product_id,remarks,preparation_id)
+         VALUES($1,$2,$3,'kg',$4,$5,$6,'Used in Ready Feed batch',$7)`,
+        [ownerId, date, source.quantityKg, bagsEquivalent, source.name, source.id, batchId],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO feed_preparation_items(owner_id,preparation_id,source_type,raw_material_id,quantity_kg)
+         VALUES($1,$2,'raw_material',$3,$4)`,
+        [ownerId, batchId, source.id, source.quantityKg],
+      );
+      await client.query(
+        `INSERT INTO raw_material_logs
+         (owner_id,material_id,transaction_type,quantity,unit,transaction_date,remarks,preparation_id)
+         VALUES($1,$2,'OUTWARD_PROCESSING',$3,'kg',$4,'Used in Ready Feed batch',$5)`,
+        [ownerId, source.id, source.quantityKg, date, batchId],
+      );
+    }
+  }
+  await client.query(
+    `INSERT INTO feed_purchases
+     (owner_id,delivery_date,feed_type,feed_product_id,bags,cost_per_bag,total_cost,source,preparation_id)
+     VALUES($1,$2,'Ready Feed',$3,$4,0,0,'PROCESSING',$5)`,
+    [ownerId, date, readyFeedId, totalBags, batchId],
+  );
+  return { id: batchId, preparation_date: date, total_quantity_kg: totalKg, remarks: description };
+}
+
+export async function prepareReadyFeed(ownerId: string, d: { date?: string; ingredients: ReadyFeedIngredient[] }) {
+  return withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    const ready = await ensureReadyFeedInTx(client, ownerId);
+    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50) || 50;
+    return saveReadyFeedPreparation(client, ownerId, ready.id, kgPerBag, d);
+  });
+}
+
+export async function updateReadyFeedPreparation(
+  ownerId: string,
+  id: string,
+  d: { date?: string; ingredients: ReadyFeedIngredient[] },
+) {
+  return withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    const ready = await ensureReadyFeedInTx(client, ownerId);
+    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50) || 50;
+    return saveReadyFeedPreparation(client, ownerId, ready.id, kgPerBag, d, id);
+  });
+}
+
+export async function deleteReadyFeedPreparation(ownerId: string, id: string) {
+  await withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    const ready = await ensureReadyFeedInTx(client, ownerId);
+    const batch = await client.query(
+      'SELECT id,feed_product_id FROM feed_preparations WHERE id=$1 AND owner_id=$2 FOR UPDATE',
+      [id, ownerId],
+    );
+    if (!batch.rows.length) throw new HttpError(404, 'Ready Feed preparation not found');
+    if (batch.rows[0].feed_product_id !== ready.id) throw new HttpError(400, 'Preparation does not belong to Ready Feed');
+    const readyRemaining = await remainingForProduct(client, ownerId, ready.id);
+    const linked = await client.query(
+      'SELECT COALESCE(SUM(bags),0) AS bags FROM feed_purchases WHERE owner_id=$1 AND preparation_id=$2',
+      [ownerId, id],
+    );
+    if (readyRemaining - Number(linked.rows[0].bags) < -0.000005) {
+      throw new HttpError(400, 'Cannot delete a batch that has already been consumed from Ready Feed');
+    }
+    await client.query('DELETE FROM feed_preparations WHERE id=$1 AND owner_id=$2', [id, ownerId]);
   });
 }

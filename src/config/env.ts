@@ -20,7 +20,11 @@ export const env = {
   dbSsl: process.env.DB_SSL === 'true',
   jwtSecret: required('JWT_SECRET'),
   jwtExpires: process.env.JWT_EXPIRES || '7d',
-  publicUrl: (process.env.PUBLIC_URL || `http://localhost:${port}`).replace(/\/$/, ''),
+  publicUrl: (
+    process.env.APP_PUBLIC_URL ||
+    process.env.PUBLIC_URL ||
+    'https://egg-farm-backend.onrender.com'
+  ).replace(/\/$/, ''),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   autoMigrate: process.env.AUTO_MIGRATE !== 'false',
   supabaseUrl: (process.env.SUPABASE_URL || '').trim(),
