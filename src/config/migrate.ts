@@ -8,7 +8,8 @@ const CONSENT_SCHEMA_VERSION = 3;
 const LOGIN_SECURITY_SCHEMA_VERSION = 4;
 const SHARED_INVENTORY_SCHEMA_VERSION = 8;
 const PERFORMANCE_INDEX_SCHEMA_VERSION = 6;
-const CURRENT_SCHEMA_VERSION = 8;
+const POULTRY_MANURE_SCHEMA_VERSION = 7;
+const SUBSCRIPTION_SCHEMA_VERSION = 9;
 
 export async function runMigrations(): Promise<void> {
   const existingIdType = await pool.query<{ id_type: string }>(
@@ -86,12 +87,19 @@ export async function runMigrations(): Promise<void> {
     );
     await pool.query(performanceIndexesMigration);
   }
-  if (appliedVersion < CURRENT_SCHEMA_VERSION) {
+  if (appliedVersion < POULTRY_MANURE_SCHEMA_VERSION) {
     const poultryManureMigration = fs.readFileSync(
       path.join(__dirname, '../../sql/poultry_manure_sales.sql'),
       'utf8',
     );
     await pool.query(poultryManureMigration);
+  }
+  if (appliedVersion < SUBSCRIPTION_SCHEMA_VERSION) {
+    const subscriptionMigration = fs.readFileSync(
+      path.join(__dirname, '../../sql/subscriptions.sql'),
+      'utf8',
+    );
+    await pool.query(subscriptionMigration);
   }
   console.log('✔ Database schema is up to date');
 }

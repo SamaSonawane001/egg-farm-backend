@@ -7,6 +7,7 @@ import {
   findOrCreateCustomer,
   normalizeCustomerPhone,
 } from './customer.service';
+import { assertCanCreateInvoice } from './subscription.service';
 
 export const list = async (ownerId: string, limit = 10, offset = 0) => {
   const [data, count] = await Promise.all([
@@ -131,6 +132,7 @@ export async function create(ownerId: string, d: any) {
 
   const id = await withTx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+    await assertCanCreateInvoice(c, ownerId);
     const year = new Date().getFullYear();
     const stock = await getEggStock(ownerId, c);
     let totalEggQuantity = 0;

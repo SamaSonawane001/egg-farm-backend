@@ -37,4 +37,7 @@ export const env = {
   supabaseServiceRoleKey,
   supabaseStorageBucket,
   otpDevBypass: !isProduction && process.env.OTP_DEV_BYPASS === 'true',
+  razorpayKeyId: process.env.RAZORPAY_KEY_ID?.trim() || '',
+  razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET?.trim() || '',
+  razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || '',
 };

@@ -15,6 +15,7 @@ import { health } from '../controllers/health.controller';
 import * as U from '../controllers/upload.controller';
 import * as Farm from '../controllers/farm.controller';
 import { loginLimiter, otpIpLimiter, otpPhoneLimiter } from '../middlewares/rateLimit';
+import subscriptionRoutes from './subscription.routes';
 
 const r = Router();
 
@@ -30,6 +31,7 @@ r.get('/health', health);
 
 // ---- everything below requires a valid JWT; req.ownerId is the tenant ----
 r.use(auth, farmContext);
+r.use('/subscription', subscriptionRoutes);
 r.get('/auth/me', A.me);
 r.get('/farms', Farm.list);
 r.post('/farms', Farm.create);
