@@ -19,6 +19,9 @@ ALTER TABLE medicine_usage_allocations
 ALTER TABLE medicine_logs
   ADD COLUMN IF NOT EXISTS is_shared_pool BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- This backfill only derives cost totals; it does not change farm ownership.
+-- Bypass the request-context trigger while running this startup migration.
+ALTER TABLE medicine_usage DISABLE TRIGGER business_row_farm;
 UPDATE medicine_usage u
 SET total_cost = COALESCE((
   SELECT ROUND(SUM(a.quantity * b.total_cost / NULLIF(b.received_quantity,0)),2)
@@ -27,6 +30,7 @@ SET total_cost = COALESCE((
   WHERE a.owner_id=u.owner_id AND a.usage_id=u.id
 ),0)
 WHERE u.total_cost=0;
+ALTER TABLE medicine_usage ENABLE TRIGGER business_row_farm;
 
 DROP INDEX IF EXISTS idx_raw_materials_farm_name_ci;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_local_farm_name_ci
