@@ -17,6 +17,11 @@ CREATE TABLE IF NOT EXISTS users (
   signature_url TEXT,
   payment_qr_url TEXT,
   address TEXT,
+  consent_accepted BOOLEAN NOT NULL DEFAULT FALSE,
+  consent_version VARCHAR(32) NOT NULL DEFAULT 'v1.0-2027',
+  consent_accepted_at TIMESTAMPTZ NULL,
+  failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until TIMESTAMPTZ NULL,
   low_stock_threshold NUMERIC(10,2) NOT NULL DEFAULT 10,
   kg_per_bag NUMERIC(10,2) NOT NULL DEFAULT 50,
   default_tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
@@ -528,7 +533,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   invoice_year INT NOT NULL DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)::int,
   invoice_seq INT NOT NULL,
   invoice_no VARCHAR(30) NOT NULL,
-  invoice_type VARCHAR(20) NOT NULL CHECK (invoice_type IN ('egg_sale','spent_hen_sale','feed_trade')),
+  invoice_type VARCHAR(20) NOT NULL CHECK (invoice_type IN ('egg_sale','spent_hen_sale','poultry_manure_sale','feed_trade')),
   customer_name VARCHAR(160) NOT NULL,
   customer_mobile VARCHAR(20),
   invoice_date DATE NOT NULL,
@@ -573,7 +578,8 @@ CREATE TABLE IF NOT EXISTS invoice_items (
   quantity NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
   unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
   amount NUMERIC(18,2) NOT NULL,
-  egg_quantity INT CHECK (egg_quantity IS NULL OR egg_quantity > 0)
+  egg_quantity INT CHECK (egg_quantity IS NULL OR egg_quantity > 0),
+  sale_unit VARCHAR(24) CHECK (sale_unit IS NULL OR sale_unit IN ('bag','tractor_trolley','ton'))
 );
 
 CREATE TABLE IF NOT EXISTS customers (
@@ -604,6 +610,7 @@ CREATE TABLE IF NOT EXISTS customer_payments (
 
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_quantity INT;
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_unit VARCHAR(10);
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS sale_unit VARCHAR(24);
 UPDATE invoice_items it
 SET egg_quantity = CASE
   WHEN lower(it.description) ~ '(crate|tray)' THEN round(it.quantity * 30)::int
@@ -628,6 +635,10 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoice_items_egg_unit_check') THEN
     ALTER TABLE invoice_items ADD CONSTRAINT invoice_items_egg_unit_check
       CHECK (egg_unit IS NULL OR egg_unit IN ('eggs','crate','tray'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoice_items_sale_unit_check') THEN
+    ALTER TABLE invoice_items ADD CONSTRAINT invoice_items_sale_unit_check
+      CHECK (sale_unit IS NULL OR sale_unit IN ('bag','tractor_trolley','ton'));
   END IF;
 END $$;
 

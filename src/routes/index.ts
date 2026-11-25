@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { auth } from '../middlewares/auth';
+import { auth, farmContext } from '../middlewares/auth';
 import { uploadAvatar, uploadProfileAsset, uploadProfileAvatar } from '../middlewares/upload';
 import * as A from '../controllers/auth.controller';
 import * as F from '../controllers/flock.controller';
@@ -13,19 +13,29 @@ import * as FX from '../controllers/farmExpense.controller';
 import { dashboard } from '../controllers/dashboard.controller';
 import { health } from '../controllers/health.controller';
 import * as U from '../controllers/upload.controller';
+import * as Farm from '../controllers/farm.controller';
+import { loginLimiter, otpIpLimiter, otpPhoneLimiter } from '../middlewares/rateLimit';
 
 const r = Router();
 
 // ---- public ----
+r.post('/auth/send-signup-otp', otpIpLimiter, otpPhoneLimiter, A.sendSignupOtp);
+r.post('/auth/verify-signup-otp', A.verifySignupOtp);
+r.post('/auth/send-reset-otp', otpIpLimiter, otpPhoneLimiter, A.sendResetOtp);
+r.post('/auth/reset-password', A.resetPassword);
 r.post('/auth/register', uploadAvatar, A.register);
-r.post('/auth/login', A.login);
+r.post('/auth/login', loginLimiter, A.login);
 r.get('/public/invoices/:id/pdf', I.publicPdf);
 r.get('/health', health);
 
 // ---- everything below requires a valid JWT; req.ownerId is the tenant ----
-r.use(auth);
+r.use(auth, farmContext);
 r.get('/auth/me', A.me);
+r.get('/farms', Farm.list);
+r.post('/farms', Farm.create);
+r.put('/farms/:farmId([0-9a-fA-F-]{36})', Farm.renameUnit);
 r.put('/profile', uploadProfileAvatar, A.updateProfile);
+r.patch('/profile/inventory-mode', A.updateInventoryMode);
 r.post('/profile/upload-avatar', uploadProfileAvatar, U.avatar);
 r.post('/profile/assets/:asset', uploadProfileAsset, A.uploadFarmAssetImage);
 r.delete('/profile/assets/:asset', A.removeFarmAsset);

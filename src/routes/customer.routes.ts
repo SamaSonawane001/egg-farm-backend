@@ -1,10 +1,10 @@
 import { Router } from 'express';
-import { auth } from '../middlewares/auth';
+import { auth, farmContext } from '../middlewares/auth';
 import * as C from '../controllers/customer.controller';
 
 const customerRoutes = Router();
 
-customerRoutes.use(auth);
+customerRoutes.use(auth, farmContext);
 customerRoutes.get('/', C.list);
 customerRoutes.get('/:customerId/ledger', C.ledger);
 customerRoutes.post('/:customerId/payments', C.receivePayment);

@@ -1,4 +1,9 @@
-import { INVOICE_TYPE_LABEL, InvoiceType } from '../models/types';
+import {
+  INVOICE_SALE_UNIT_LABEL,
+  INVOICE_TYPE_LABEL,
+  InvoiceSaleUnit,
+  InvoiceType,
+} from '../models/types';
 import { env } from '../config/env';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -198,7 +203,7 @@ async function loadFarmAsset(
 
 export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId: string): Promise<Buffer> {
   const [logo, signature, paymentQr] = await Promise.all([
-    loadFarmLogo(farm.avatar_url, ownerId),
+    loadFarmLogo(farm.logo_url ?? farm.avatar_url, ownerId),
     loadFarmAsset(farm.signature_url, ownerId, 'signature'),
     loadFarmAsset(farm.payment_qr_url, ownerId, 'payment_qr'),
   ]);
@@ -277,7 +282,13 @@ export async function buildInvoicePdf(inv: any, items: any[], farm: any, ownerId
                     margin: [4, 3, 4, 3],
                   }
                 : { text: it.description, margin: [4, 3, 4, 3] },
-              { text: String(it.quantity), alignment: 'right', margin: [4, 3, 4, 3] },
+              {
+                text: `${quantity(Number(it.quantity))}${it.sale_unit
+                  ? ` ${INVOICE_SALE_UNIT_LABEL[it.sale_unit as InvoiceSaleUnit]}${Number(it.quantity) === 1 ? '' : 's'}`
+                  : ''}`,
+                alignment: 'right',
+                margin: [4, 3, 4, 3],
+              },
               { text: inv.invoice_type === 'egg_sale' && it.egg_unit
                 ? `${rs(it.unit_price)} / egg`
                 : rs(it.unit_price), alignment: 'right', margin: [4, 3, 4, 3] },

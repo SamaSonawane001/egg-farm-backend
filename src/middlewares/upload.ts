@@ -72,6 +72,29 @@ const profileAssetParser = multer({
   },
 }).single('image');
 
+function respondUploadError(
+  res: Response,
+  error: unknown,
+  fallbackMessage: string,
+): void {
+  const isMulterError = error instanceof multer.MulterError;
+  const status = error instanceof HttpError
+    ? error.status
+    : isMulterError && error.code === 'LIMIT_FILE_SIZE'
+      ? 413
+      : isMulterError
+        ? 400
+        : 500;
+  const message = error instanceof HttpError
+    ? error.message
+    : isMulterError && error.code === 'LIMIT_FILE_SIZE'
+      ? 'Uploaded file is too large'
+      : isMulterError
+        ? 'Invalid upload request'
+        : fallbackMessage;
+  res.status(status).json({ success: false, error: message, message });
+}
+
 export const uploadProfileAsset = (
   req: Request,
   res: Response,
@@ -84,17 +107,7 @@ export const uploadProfileAsset = (
     }
 
     console.error('Farm image upload failed:', error);
-    const status = error instanceof HttpError
-      ? error.status
-      : error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE'
-        ? 413
-        : error instanceof multer.MulterError
-          ? 400
-          : 500;
-    res.status(status).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Farm image upload failed',
-    });
+    respondUploadError(res, error, 'Farm image upload failed');
   });
 };
 
@@ -110,16 +123,6 @@ export const uploadProfileAvatar = (
     }
 
     console.error('Avatar multipart upload failed:', error);
-    const status = error instanceof HttpError
-      ? error.status
-      : error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE'
-        ? 413
-        : error instanceof multer.MulterError
-          ? 400
-          : 500;
-    res.status(status).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Avatar upload failed',
-    });
+    respondUploadError(res, error, 'Avatar upload failed');
   });
 };

@@ -36,7 +36,7 @@ const processingBody = z.object({
   date: calendarDate,
   material_id: z.string().uuid(),
   quantity: quantity3,
-  unit: z.enum(['kg', 'quintal', 'bags']),
+  unit: z.enum(['kg', 'quintal', 'bags', 'ton']),
   remarks: optText,
 });
 const inwardUpdateBody = z.object({
@@ -54,7 +54,7 @@ const inwardUpdateBody = z.object({
 const usageUpdateBody = z.object({
   date: calendarDate.optional(),
   quantity: quantity3.optional(),
-  unit: z.enum(['kg', 'quintal', 'bags']).optional(),
+  unit: z.enum(['kg', 'quintal', 'bags', 'ton']).optional(),
   remarks: optText.optional(),
 }).refine((body) => Object.keys(body).length > 0, 'At least one field is required');
 const dateFilters = z.object({

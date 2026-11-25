@@ -116,7 +116,7 @@ export async function create(ownerId: string, d: { collection_date: string; batc
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
-    const settings = await client.query('SELECT eggs_per_tray FROM users WHERE id=$1', [ownerId]);
+    const settings = await client.query(`SELECT eggs_per_tray FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
     if (!settings.rows.length) throw new HttpError(404, 'Farm profile not found');
     const eggsPerTray = Number(settings.rows[0].eggs_per_tray);
     const totalEggs = validate(d, eggsPerTray);

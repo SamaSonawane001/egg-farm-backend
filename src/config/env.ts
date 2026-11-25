@@ -13,6 +13,7 @@ const supabaseServiceRoleKey = [
   process.env.SUPABASE_SECRET_KEY,
 ].map((value) => value?.trim()).find(Boolean) || '';
 const supabaseStorageBucket = process.env.SUPABASE_STORAGE_BUCKET?.trim() || 'farm-receipts';
+const isProduction = process.env.NODE_ENV === 'production';
 
 export const env = {
   port,
@@ -28,6 +29,12 @@ export const env = {
   corsOrigin: process.env.CORS_ORIGIN || '*',
   autoMigrate: process.env.AUTO_MIGRATE !== 'false',
   supabaseUrl: (process.env.SUPABASE_URL || '').trim(),
+  supabaseAnonKey: (
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_KEY ||
+    ''
+  ).trim(),
   supabaseServiceRoleKey,
   supabaseStorageBucket,
+  otpDevBypass: !isProduction && process.env.OTP_DEV_BYPASS === 'true',
 };

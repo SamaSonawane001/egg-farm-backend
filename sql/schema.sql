@@ -1,4 +1,4 @@
--- Egg Farm Manager schema (idempotent). Every business table carries owner_id -> users(id).
+-- Initial schema migration. Applied and versioned by backend/src/config/migrate.ts.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -11,6 +11,11 @@ CREATE TABLE IF NOT EXISTS users (
   signature_url TEXT,
   payment_qr_url TEXT,
   address TEXT,
+  consent_accepted BOOLEAN NOT NULL DEFAULT FALSE,
+  consent_version VARCHAR(32) NOT NULL DEFAULT 'v1.0-2027',
+  consent_accepted_at TIMESTAMPTZ NULL,
+  failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until TIMESTAMPTZ NULL,
   low_stock_threshold NUMERIC(10,2) NOT NULL DEFAULT 10,
   kg_per_bag NUMERIC(10,2) NOT NULL DEFAULT 50,
   default_tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
@@ -522,7 +527,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   invoice_year INT NOT NULL DEFAULT EXTRACT(YEAR FROM CURRENT_DATE)::int,
   invoice_seq INT NOT NULL,
   invoice_no VARCHAR(30) NOT NULL,
-  invoice_type VARCHAR(20) NOT NULL CHECK (invoice_type IN ('egg_sale','spent_hen_sale','feed_trade')),
+  invoice_type VARCHAR(20) NOT NULL CHECK (invoice_type IN ('egg_sale','spent_hen_sale','poultry_manure_sale','feed_trade')),
   customer_name VARCHAR(160) NOT NULL,
   customer_mobile VARCHAR(20),
   invoice_date DATE NOT NULL,
@@ -565,7 +570,8 @@ CREATE TABLE IF NOT EXISTS invoice_items (
   quantity NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
   unit_price NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
   amount NUMERIC(18,2) NOT NULL,
-  egg_quantity INT CHECK (egg_quantity IS NULL OR egg_quantity > 0)
+  egg_quantity INT CHECK (egg_quantity IS NULL OR egg_quantity > 0),
+  sale_unit VARCHAR(24) CHECK (sale_unit IS NULL OR sale_unit IN ('bag','tractor_trolley','ton'))
 );
 
 CREATE TABLE IF NOT EXISTS customers (
@@ -724,6 +730,7 @@ AND NOT EXISTS (
 
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_quantity INT;
 ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS egg_unit VARCHAR(10);
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS sale_unit VARCHAR(24);
 UPDATE invoice_items it
 SET egg_quantity = CASE
   WHEN lower(it.description) ~ '(crate|tray)' THEN round(it.quantity * 30)::int
@@ -748,6 +755,10 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoice_items_egg_unit_check') THEN
     ALTER TABLE invoice_items ADD CONSTRAINT invoice_items_egg_unit_check
       CHECK (egg_unit IS NULL OR egg_unit IN ('eggs','crate','tray'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'invoice_items_sale_unit_check') THEN
+    ALTER TABLE invoice_items ADD CONSTRAINT invoice_items_sale_unit_check
+      CHECK (sale_unit IS NULL OR sale_unit IN ('bag','tractor_trolley','ton'));
   END IF;
 END $$;
 
@@ -836,3 +847,223 @@ BEGIN
     EXECUTE format('CREATE POLICY tenant_isolation ON %I USING (owner_id = NULLIF(current_setting(''app.owner_id'', true), '''')::UUID)', t);
   END LOOP;
 END $$;
+
+-- A user account may own multiple independent farm units. Existing profile
+-- fields are copied to the primary farm so current accounts remain unchanged.
+CREATE TABLE IF NOT EXISTS farms (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name VARCHAR(160) NOT NULL,
+  is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+  avatar_url TEXT,
+  signature_url TEXT,
+  payment_qr_url TEXT,
+  address TEXT,
+  low_stock_threshold NUMERIC(10,2) NOT NULL DEFAULT 10,
+  kg_per_bag NUMERIC(10,2) NOT NULL DEFAULT 50,
+  default_tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0,
+  eggs_per_tray INT NOT NULL DEFAULT 30 CHECK (eggs_per_tray > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS name VARCHAR(160);
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS signature_url TEXT;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS payment_qr_url TEXT;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS low_stock_threshold NUMERIC(10,2) NOT NULL DEFAULT 10;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS kg_per_bag NUMERIC(10,2) NOT NULL DEFAULT 50;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS default_tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS eggs_per_tray INT NOT NULL DEFAULT 30;
+ALTER TABLE farms ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+-- Compatibility with installations that already have a legacy farms table.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='users' AND column_name='farm_id'
+  ) THEN
+    EXECUTE 'UPDATE farms f SET owner_user_id=u.id, is_primary=TRUE
+             FROM users u WHERE u.farm_id=f.id AND f.owner_user_id IS NULL';
+  END IF;
+END $$;
+
+INSERT INTO farms (
+  owner_user_id,name,is_primary,avatar_url,signature_url,payment_qr_url,address,
+  low_stock_threshold,kg_per_bag,default_tax_percent,eggs_per_tray
+)
+SELECT u.id,u.farm_name,TRUE,u.avatar_url,u.signature_url,u.payment_qr_url,u.address,
+       u.low_stock_threshold,u.kg_per_bag,u.default_tax_percent,u.eggs_per_tray
+FROM users u
+WHERE NOT EXISTS (SELECT 1 FROM farms f WHERE f.owner_user_id=u.id);
+
+UPDATE farms SET name='Farm' WHERE name IS NULL OR trim(name)='';
+WITH ranked_farms AS (
+  SELECT id,
+         row_number() OVER (
+           PARTITION BY owner_user_id
+           ORDER BY is_primary DESC, created_at, id
+         ) AS position
+  FROM farms
+)
+UPDATE farms f SET is_primary=(r.position=1)
+FROM ranked_farms r
+WHERE f.id=r.id AND f.is_primary IS DISTINCT FROM (r.position=1);
+ALTER TABLE farms ALTER COLUMN owner_user_id SET NOT NULL;
+ALTER TABLE farms ALTER COLUMN name SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_farms_owner_name ON farms(owner_user_id, lower(trim(name)));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_farms_single_primary ON farms(owner_user_id) WHERE is_primary;
+CREATE INDEX IF NOT EXISTS idx_farms_owner ON farms(owner_user_id, created_at, id);
+
+-- Add and backfill the farm key on every owner-scoped business table.
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage',
+    'feed_preparations','feed_preparation_items','egg_production','invoices',
+    'invoice_items','farm_expenses','customers','customer_payments','raw_materials',
+    'raw_material_processing','raw_material_logs','medicines','medicine_batches',
+    'medicine_usage','medicine_usage_allocations','medicine_logs'
+  ]
+  LOOP
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS farm_id UUID REFERENCES farms(id) ON DELETE CASCADE', t);
+    EXECUTE format(
+      'UPDATE %I b SET farm_id=f.id FROM farms f
+       WHERE b.owner_id=f.owner_user_id AND f.is_primary AND b.farm_id IS NULL', t
+    );
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN farm_id SET NOT NULL', t);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON %I(farm_id)', 'idx_' || t || '_farm_id', t);
+  END LOOP;
+END $$;
+
+-- Uniqueness is farm-local, not account-wide.
+ALTER TABLE feed_products DROP CONSTRAINT IF EXISTS feed_products_owner_id_name_key;
+DROP INDEX IF EXISTS idx_feed_products_owner_name_ci;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_farm_name_ci
+  ON feed_products(farm_id, lower(trim(name)));
+
+DROP INDEX IF EXISTS idx_raw_materials_owner_name_ci;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_farm_name_ci
+  ON raw_materials(farm_id, lower(trim(name)));
+
+DROP INDEX IF EXISTS idx_medicines_owner_name_ci;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_farm_name_ci
+  ON medicines(farm_id, lower(trim(name)));
+
+ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_owner_id_invoice_year_invoice_seq_key;
+DROP INDEX IF EXISTS idx_invoices_owner_year_seq;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_farm_year_seq
+  ON invoices(farm_id, invoice_year, invoice_seq);
+
+ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_owner_id_phone_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_farm_phone
+  ON customers(owner_id, farm_id, phone);
+
+CREATE OR REPLACE FUNCTION set_business_row_farm() RETURNS TRIGGER AS $$
+DECLARE
+  context_owner UUID := NULLIF(current_setting('app.owner_id', true), '')::UUID;
+  context_farm UUID := NULLIF(current_setting('app.farm_id', true), '')::UUID;
+BEGIN
+  IF context_owner IS NULL OR context_farm IS NULL THEN
+    RAISE EXCEPTION 'A specific farm context is required for business writes'
+      USING ERRCODE = '42501';
+  END IF;
+  IF NEW.owner_id <> context_owner THEN
+    RAISE EXCEPTION 'Business row owner does not match request owner'
+      USING ERRCODE = '42501';
+  END IF;
+  IF NEW.farm_id IS NOT NULL AND NEW.farm_id <> context_farm THEN
+    RAISE EXCEPTION 'Business row farm does not match selected farm'
+      USING ERRCODE = '42501';
+  END IF;
+  NEW.farm_id := context_farm;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage',
+    'feed_preparations','feed_preparation_items','egg_production','invoices',
+    'invoice_items','farm_expenses','customers','customer_payments','raw_materials',
+    'raw_material_processing','raw_material_logs','medicines','medicine_batches',
+    'medicine_usage','medicine_usage_allocations','medicine_logs'
+  ]
+  LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS business_row_farm ON %I', t);
+    EXECUTE format(
+      'CREATE TRIGGER business_row_farm BEFORE INSERT OR UPDATE ON %I
+       FOR EACH ROW EXECUTE FUNCTION set_business_row_farm()', t
+    );
+  END LOOP;
+END $$;
+
+-- Keep the existing owner RLS boundary and add the selected farm set. FORCE
+-- ensures a table-owning connection is also subject to tenant policies.
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage',
+    'feed_preparations','feed_preparation_items','egg_production','invoices',
+    'invoice_items','farm_expenses','customers','customer_payments','raw_materials',
+    'raw_material_processing','raw_material_logs','medicines','medicine_batches',
+    'medicine_usage','medicine_usage_allocations','medicine_logs'
+  ]
+  LOOP
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);
+    EXECUTE format(
+      'CREATE POLICY tenant_isolation ON %I USING (
+         owner_id = NULLIF(current_setting(''app.owner_id'', true), '''')::UUID
+         AND farm_id = ANY(string_to_array(
+           NULLIF(current_setting(''app.farm_ids'', true), ''''), '',''
+         )::UUID[])
+       ) WITH CHECK (
+         owner_id = NULLIF(current_setting(''app.owner_id'', true), '''')::UUID
+         AND farm_id = ANY(string_to_array(
+           NULLIF(current_setting(''app.farm_ids'', true), ''''), '',''
+         )::UUID[])
+       )', t
+    );
+  END LOOP;
+END $$;
+
+-- The legacy user trigger seeded account-wide products before farms existed.
+-- New farms seed their own default product in the application transaction.
+DROP TRIGGER IF EXISTS users_create_ready_feed ON users;
+DROP FUNCTION IF EXISTS public_invoice_scope(UUID);
+DROP POLICY IF EXISTS public_invoice_link ON invoices;
+CREATE POLICY public_invoice_link ON invoices FOR SELECT USING (
+  id::text = NULLIF(current_setting('app.public_invoice_id', true), '')
+  OR share_token::text = NULLIF(current_setting('app.public_invoice_id', true), '')
+);
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='egg_farm_runtime') THEN
+    EXECUTE 'CREATE ROLE egg_farm_runtime NOLOGIN NOBYPASSRLS';
+  END IF;
+  EXECUTE 'ALTER ROLE egg_farm_runtime NOBYPASSRLS';
+  IF current_user <> 'egg_farm_runtime' THEN
+    EXECUTE format('GRANT egg_farm_runtime TO %I', current_user);
+  END IF;
+END $$;
+GRANT USAGE ON SCHEMA public TO egg_farm_runtime;
+GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO egg_farm_runtime;
+GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA public TO egg_farm_runtime;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO egg_farm_runtime;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE,SELECT,UPDATE ON SEQUENCES TO egg_farm_runtime;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations(version) VALUES (1) ON CONFLICT DO NOTHING;

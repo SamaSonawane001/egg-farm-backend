@@ -1,25 +1,53 @@
 import { PoolClient } from 'pg';
 import { query, withTx } from '../config/db';
+import { getFarmContext } from '../config/farmContext';
 import { HttpError } from '../utils/httpError';
 import { ensureBatch } from './flock.service';
 
 export async function getStock(ownerId: string) {
-  await ensureReadyFeed(ownerId);
+  const farmContext = getFarmContext();
+  const activeFarmId = farmContext?.farmId ?? null;
+  const farmIds = farmContext?.farmIds ?? null;
+  if (activeFarmId != null) await ensureReadyFeed(ownerId);
   const [totals, feeds, settings] = await Promise.all([
     query(
-      `SELECT COALESCE((SELECT SUM(bags) FROM feed_purchases WHERE owner_id=$1 AND preparation_id IS NULL),0) AS purchased,
-              COALESCE((SELECT SUM(bags_equivalent) FROM feed_usage WHERE owner_id=$1 AND preparation_id IS NULL),0) AS consumed`,
-      [ownerId]
+      `SELECT COALESCE((SELECT SUM(bags) FROM feed_purchases
+                        WHERE owner_id=$1
+                          AND ($3::uuid[] IS NULL OR farm_id=ANY($3::uuid[]))
+                          AND ($2::uuid IS NULL OR farm_id=$2)),0) AS purchased,
+              COALESCE((SELECT SUM(bags_equivalent) FROM feed_usage
+                        WHERE owner_id=$1
+                          AND ($3::uuid[] IS NULL OR farm_id=ANY($3::uuid[]))
+                          AND ($2::uuid IS NULL OR farm_id=$2)),0) AS consumed`,
+      [ownerId, activeFarmId, farmIds]
     ),
     query(
-      `SELECT fp.id, fp.name AS feed_type,
-              COALESCE((SELECT SUM(p.bags) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS purchased,
-              COALESCE((SELECT SUM(u.bags_equivalent) FROM feed_usage u WHERE u.owner_id=fp.owner_id AND u.feed_product_id=fp.id),0) AS consumed
-       FROM feed_products fp WHERE fp.owner_id=$1
+      `SELECT fp.id, fp.name AS feed_type,fp.farm_id,f.name AS farm_name,
+              COALESCE((SELECT SUM(p.bags) FROM feed_purchases p
+                        WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id
+                          AND ($3::uuid[] IS NULL OR p.farm_id=ANY($3::uuid[]))
+                          AND ($2::uuid IS NULL OR p.farm_id=$2)),0) AS purchased,
+              COALESCE((SELECT SUM(u.bags_equivalent) FROM feed_usage u
+                        WHERE u.owner_id=fp.owner_id AND u.feed_product_id=fp.id
+                          AND ($3::uuid[] IS NULL OR u.farm_id=ANY($3::uuid[]))
+                          AND ($2::uuid IS NULL OR u.farm_id=$2)),0) AS consumed
+       FROM feed_products fp
+       JOIN farms f ON f.id=fp.farm_id AND f.owner_user_id=fp.owner_id
+       WHERE fp.owner_id=$1
+         AND ($3::uuid[] IS NULL OR fp.farm_id=ANY($3::uuid[]))
+         AND ($2::uuid IS NULL OR fp.farm_id=$2)
        ORDER BY CASE WHEN lower(trim(fp.name))='ready feed' THEN 0 ELSE 1 END, lower(fp.name), fp.id`,
-      [ownerId]
+      [ownerId, activeFarmId, farmIds]
     ),
-    query('SELECT low_stock_threshold AS threshold, kg_per_bag FROM users WHERE id=$1', [ownerId]),
+    query(
+      `SELECT COALESCE(SUM(low_stock_threshold),10) AS threshold,
+              COALESCE(AVG(kg_per_bag),50) AS kg_per_bag
+       FROM farms
+       WHERE owner_user_id=$1
+         AND ($3::uuid[] IS NULL OR id=ANY($3::uuid[]))
+         AND ($2::uuid IS NULL OR id=$2)`,
+      [ownerId, activeFarmId, farmIds],
+    ),
   ]);
   const { purchased, consumed } = totals[0];
   const threshold = settings[0]?.threshold ?? 10;
@@ -58,7 +86,7 @@ export const listPurchases = async (ownerId: string, limit = 20, offset = 0) => 
 };
 
 export const listProducts = async (ownerId: string) => {
-  await ensureReadyFeed(ownerId);
+  if (getFarmContext()?.farmId != null) await ensureReadyFeed(ownerId);
   const rows = await query(
     `SELECT fp.id, fp.name,
             COALESCE((SELECT SUM(p.bags) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS purchased_bags,
@@ -259,7 +287,7 @@ export async function createPurchase(ownerId: string, d: any) {
     if (product.rows[0].name.trim().toLowerCase() === 'ready feed') {
       throw new HttpError(400, 'Ready Feed stock is added only through preparation batches');
     }
-    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
     const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50) || 50;
     const enteredUnit = d.unit ?? 'bags';
     const enteredQuantity = Number(d.quantity ?? d.bags);
@@ -296,7 +324,7 @@ export async function updatePurchase(ownerId: string, id: string, d: any) {
     if (product.rows[0].name.trim().toLowerCase() === 'ready feed') {
       throw new HttpError(400, 'Ready Feed stock is added only through preparation batches');
     }
-    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
     const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? old.kg_per_bag ?? 50) || 50;
     const enteredUnit = d.unit ?? 'bags';
     const enteredQuantity = Number(d.quantity ?? d.bags);
@@ -357,7 +385,7 @@ export async function createUsage(ownerId: string, d: any) {
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
-    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
     if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
     const bags = d.unit === 'bags' ? d.quantity : d.quantity / (settings.rows[0]?.kg_per_bag || 50);
@@ -379,7 +407,7 @@ export async function updateUsage(ownerId: string, id: string, d: any) {
     const existing = await client.query('SELECT id,preparation_id FROM feed_usage WHERE id=$1 AND owner_id=$2 FOR UPDATE', [id, ownerId]);
     if (!existing.rows.length) throw new HttpError(404, 'Feed usage log not found');
     if (existing.rows[0].preparation_id) throw new HttpError(400, 'Ready Feed transfer usage can only be changed by editing its preparation batch');
-    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
     if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
     const bags = d.unit === 'bags' ? d.quantity : d.quantity / (settings.rows[0]?.kg_per_bag || 50);
@@ -408,8 +436,15 @@ export async function deleteUsage(ownerId: string, id: string) {
 }
 
 export async function getReadyFeedDetail(ownerId: string) {
+  if (getFarmContext()?.farmId == null) {
+    throw new HttpError(409, 'Select an individual farm to view Ready Feed details');
+  }
   const ready = await ensureReadyFeed(ownerId);
-  const settings = await query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+  const settings = await query(
+    `SELECT kg_per_bag FROM farms WHERE owner_user_id=$1
+     AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`,
+    [ownerId],
+  );
   const kgPerBag = Number(settings[0]?.kg_per_bag ?? 50) || 50;
   const [products, preparations, usage] = await Promise.all([
     listProducts(ownerId),
@@ -467,6 +502,16 @@ async function saveReadyFeedPreparation(
   d: { date?: string; ingredients: ReadyFeedIngredient[] },
   preparationId?: string,
 ) {
+  const activeFarmId = getFarmContext()?.farmId;
+  if (!activeFarmId) {
+    throw new HttpError(409, 'Select an individual farm to prepare feed');
+  }
+  const inventoryMode = await client.query<{ shared_inventory_enabled: boolean }>(
+    'SELECT shared_inventory_enabled FROM users WHERE id=$1',
+    [ownerId],
+  );
+  const sharedInventoryEnabled =
+    inventoryMode.rows[0]?.shared_inventory_enabled === true;
   const previous = preparationId
     ? await client.query(
         'SELECT * FROM feed_preparations WHERE id=$1 AND owner_id=$2 FOR UPDATE',
@@ -525,7 +570,15 @@ async function saveReadyFeedPreparation(
   const totalBags = Math.round((totalKg / kgPerBag) * 100000) / 100000;
   if (!Number.isFinite(totalBags) || totalBags <= 0) throw new HttpError(400, 'Ready Feed quantity is too small');
 
-  const sourceRows: Array<{ sourceType: 'feed' | 'raw_material'; id: string; name: string; quantityKg: number }> = [];
+  const sourceRows: Array<{
+    sourceType: 'feed' | 'raw_material';
+    id: string;
+    name: string;
+    quantityKg: number;
+    sharedPool: boolean;
+    ratePerKg: number;
+    totalCost: number;
+  }> = [];
   for (const ingredient of ingredients.values()) {
     if (ingredient.sourceType === 'feed') {
       const product = await client.query(
@@ -547,13 +600,24 @@ async function saveReadyFeedPreparation(
         id: ingredient.itemId,
         name: product.rows[0].name,
         quantityKg: ingredient.quantityKg,
+        sharedPool: false,
+        ratePerKg: 0,
+        totalCost: 0,
       });
     } else {
       const material = await client.query(
-        'SELECT id,name,unit FROM raw_materials WHERE id=$1 AND owner_id=$2 FOR UPDATE',
-        [ingredient.itemId, ownerId],
+        `SELECT m.id,m.name,m.unit,m.is_shared_pool
+         FROM raw_materials m
+         JOIN farms f ON f.id=m.farm_id AND f.owner_user_id=m.owner_id
+         WHERE m.id=$1 AND m.owner_id=$2
+           AND (m.farm_id=$3 OR (m.is_shared_pool=TRUE AND $4::boolean))
+         FOR UPDATE OF m`,
+        [ingredient.itemId, ownerId, activeFarmId, sharedInventoryEnabled],
       );
       if (!material.rows.length) throw new HttpError(404, 'Source raw material not found');
+      if (material.rows[0].is_shared_pool && !sharedInventoryEnabled) {
+        throw new HttpError(409, 'Enable Central Godown to consume shared stock');
+      }
       if (material.rows[0].unit !== 'kg') {
         throw new HttpError(500, 'Raw material has not been migrated to kilogram stock');
       }
@@ -566,15 +630,33 @@ async function saveReadyFeedPreparation(
       if (ingredient.quantityKg - availableKg > 0.0005) {
         throw new HttpError(400, `Not enough ${material.rows[0].name} in stock (${Math.max(0, availableKg)} kg available)`);
       }
+      let ratePerKg = 0;
+      let totalCost = 0;
+      if (material.rows[0].is_shared_pool) {
+        const weightedCost = await client.query(
+          `SELECT CASE WHEN COALESCE(SUM(quantity),0)>0
+                       THEN SUM(total_amount)/SUM(quantity) ELSE 0 END AS rate
+           FROM raw_material_logs
+           WHERE owner_id=$1 AND material_id=$2 AND transaction_type='INWARD'`,
+          [ownerId, ingredient.itemId],
+        );
+        ratePerKg = Number(weightedCost.rows[0].rate);
+        totalCost = Math.round(ingredient.quantityKg * ratePerKg * 100) / 100;
+      }
       sourceRows.push({
         sourceType: 'raw_material',
         id: ingredient.itemId,
         name: material.rows[0].name,
         quantityKg: ingredient.quantityKg,
+        sharedPool: Boolean(material.rows[0].is_shared_pool),
+        ratePerKg,
+        totalCost,
       });
     }
   }
 
+  const rawMaterialCost = sourceRows.reduce((sum, source) => sum + source.totalCost, 0);
+  const preparedFeedCost = Math.round(rawMaterialCost * 100) / 100;
   const currentReady = await remainingForProduct(client, ownerId, readyFeedId);
   const oldReadyPurchase = preparationId
     ? await client.query(
@@ -634,17 +716,21 @@ async function saveReadyFeedPreparation(
       );
       await client.query(
         `INSERT INTO raw_material_logs
-         (owner_id,material_id,transaction_type,quantity,unit,transaction_date,remarks,preparation_id)
-         VALUES($1,$2,'OUTWARD_PROCESSING',$3,'kg',$4,'Used in Ready Feed batch',$5)`,
-        [ownerId, source.id, source.quantityKg, date, batchId],
+         (owner_id,farm_id,is_shared_pool,material_id,transaction_type,quantity,unit,transaction_date,
+          remarks,preparation_id,rate_per_unit,total_amount)
+         VALUES($1,$2,$3,$4,'OUTWARD_PROCESSING',$5,'kg',$6,'Used in Ready Feed batch',$7,$8,$9)`,
+        [ownerId, activeFarmId, source.sharedPool, source.id, source.quantityKg,
+          date, batchId, source.ratePerKg || null, source.totalCost || null],
       );
     }
   }
   await client.query(
     `INSERT INTO feed_purchases
      (owner_id,delivery_date,feed_type,feed_product_id,bags,cost_per_bag,total_cost,source,preparation_id)
-     VALUES($1,$2,'Ready Feed',$3,$4,0,0,'PROCESSING',$5)`,
-    [ownerId, date, readyFeedId, totalBags, batchId],
+     VALUES($1,$2,'Ready Feed',$3,$4,$5,$6,'PROCESSING',$7)`,
+    [ownerId, date, readyFeedId, totalBags,
+      totalBags > 0 ? Math.round((preparedFeedCost / totalBags) * 100) / 100 : 0,
+      preparedFeedCost, batchId],
   );
   return { id: batchId, preparation_date: date, total_quantity_kg: totalKg, remarks: description };
 }
@@ -653,7 +739,7 @@ export async function prepareReadyFeed(ownerId: string, d: { date?: string; ingr
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const ready = await ensureReadyFeedInTx(client, ownerId);
-    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
     const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50) || 50;
     return saveReadyFeedPreparation(client, ownerId, ready.id, kgPerBag, d);
   });
@@ -667,7 +753,7 @@ export async function updateReadyFeedPreparation(
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const ready = await ensureReadyFeedInTx(client, ownerId);
-    const settings = await client.query('SELECT kg_per_bag FROM users WHERE id=$1', [ownerId]);
+    const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
     const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50) || 50;
     return saveReadyFeedPreparation(client, ownerId, ready.id, kgPerBag, d, id);
   });

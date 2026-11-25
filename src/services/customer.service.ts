@@ -2,6 +2,58 @@ import { PoolClient } from 'pg';
 import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
 
+export function normalizeCustomerPhone(value: unknown): string {
+  let digits = String(value ?? '').replace(/\D/g, '');
+  if (digits.length > 10 && digits.startsWith('91')) {
+    digits = digits.slice(2);
+  }
+  if (digits.length === 11 && digits.startsWith('0')) {
+    digits = digits.slice(1);
+  }
+  return digits.length === 10 ? digits : '';
+}
+
+export async function findOrCreateCustomer(
+  client: PoolClient,
+  ownerId: string,
+  name: string,
+  normalizedPhone: string,
+): Promise<string> {
+  if (normalizedPhone) {
+    const result = await client.query(
+      `INSERT INTO customers(owner_id,name,phone,normalized_phone)
+       VALUES($1,$2,$3,$3)
+       ON CONFLICT (farm_id,normalized_phone) WHERE normalized_phone <> ''
+       DO UPDATE SET name=CASE
+         WHEN btrim(customers.name)='' THEN EXCLUDED.name
+         ELSE customers.name
+       END
+       RETURNING id`,
+      [ownerId, name, normalizedPhone],
+    );
+    return result.rows[0].id;
+  }
+
+  const existing = await client.query(
+    `SELECT id FROM customers
+     WHERE owner_id=$1
+       AND farm_id=NULLIF(current_setting('app.farm_id',true),'')::uuid
+       AND lower(trim(name))=lower(trim($2))
+     ORDER BY created_at,id
+     LIMIT 1
+     FOR UPDATE`,
+    [ownerId, name],
+  );
+  if (existing.rows.length) return existing.rows[0].id;
+
+  const created = await client.query(
+    `INSERT INTO customers(owner_id,name,phone,normalized_phone)
+     VALUES($1,$2,'','') RETURNING id`,
+    [ownerId, name],
+  );
+  return created.rows[0].id;
+}
+
 export async function listCustomers(
   ownerId: string,
   search: string,
@@ -29,7 +81,7 @@ export async function listCustomers(
         AND payment_date >= CURRENT_DATE - INTERVAL '30 days'
       GROUP BY owner_id,customer_id
     ), customer_activity AS (
-      SELECT c.id,c.name,c.phone,c.created_at,
+      SELECT c.id,c.name,c.phone,c.normalized_phone,c.farm_id,c.created_at,
              COALESCE(i.total_billed,0) AS total_billed,
              COALESCE(p.total_paid,0) AS total_paid,
              GREATEST(COALESCE(i.total_billed,0)-COALESCE(p.total_paid,0),0) AS pending_balance,
@@ -38,7 +90,9 @@ export async function listCustomers(
       LEFT JOIN invoice_totals i ON i.owner_id=c.owner_id AND i.customer_id=c.id
       LEFT JOIN payment_totals p ON p.owner_id=c.owner_id AND p.customer_id=c.id
       WHERE c.owner_id=$1
-        AND ($2='' OR c.name ILIKE '%' || $2 || '%' OR c.phone ILIKE '%' || $2 || '%')
+        AND ($2='' OR c.name ILIKE '%' || $2 || '%'
+          OR c.phone ILIKE '%' || $2 || '%'
+          OR c.normalized_phone ILIKE '%' || $2 || '%')
     )`;
   const params = [ownerId, search.trim()];
   const [data, count] = await Promise.all([
@@ -103,7 +157,14 @@ export async function customerLedger(
               COALESCE((SELECT SUM(it.egg_quantity) FROM invoice_items it
                         WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id),0) AS egg_quantity,
               COALESCE((SELECT string_agg(
-                          format('%s × %s @ %s',it.description,it.quantity,it.unit_price),
+                          format('%s × %s%s @ %s',it.description,it.quantity,
+                            CASE it.sale_unit
+                              WHEN 'bag' THEN ' Bags / पोती'
+                              WHEN 'tractor_trolley' THEN ' Tractor Trolley / ट्रॉली'
+                              WHEN 'ton' THEN ' Ton / टन'
+                              ELSE ''
+                            END,
+                            it.unit_price),
                           ', ' ORDER BY it.id)
                         FROM invoice_items it
                         WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id),'Invoice') AS details,

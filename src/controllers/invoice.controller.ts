@@ -3,14 +3,28 @@ import { z } from 'zod';
 import { asyncHandler, dateStr, idParam, ok, okPaginated, optText } from '../utils/http';
 import { parsePagination, paginationMetadata } from '../utils/pagination';
 import * as svc from '../services/invoice.service';
+import { normalizeCustomerPhone } from '../services/customer.service';
 
 const body = z.object({
-  invoice_type: z.enum(['egg_sale', 'spent_hen_sale', 'feed_trade']),
+  invoice_type: z.enum([
+    'egg_sale',
+    'spent_hen_sale',
+    'poultry_manure_sale',
+    'feed_trade',
+  ]),
   customer_name: z.string().trim().min(1).max(160),
-  customer_mobile: z.string().regex(
-    /^[6-9]\d{9}$/,
-    'Please enter a valid 10-digit mobile number'
-  ),
+  customer_mobile: z.string().trim().max(20).default('').transform((value, context) => {
+    if (!value) return '';
+    const normalized = normalizeCustomerPhone(value);
+    if (!normalized) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Please enter a valid 10-digit mobile number',
+      });
+      return z.NEVER;
+    }
+    return normalized;
+  }),
   invoice_date: dateStr,
   payment_status: z.enum(['paid', 'unpaid']).default('unpaid'),
   tax_percent: z.coerce.number().min(0).max(100).default(0),
@@ -23,12 +37,20 @@ const body = z.object({
         unit_price: z.coerce.number().min(0).refine((n) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-8, 'Use at most 2 decimal places'),
         egg_unit: z.enum(['eggs', 'tray']).nullable().optional(),
         egg_quantity: z.coerce.number().int().positive().nullable().optional(),
+        sale_unit: z.enum(['bag', 'tractor_trolley', 'ton']).nullable().optional(),
       })
     )
     .min(1, 'Add at least one line item'),
 }).superRefine((invoice, context) => {
   invoice.items.forEach((item, index) => {
     if (invoice.invoice_type === 'egg_sale') {
+      if (item.sale_unit != null) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'sale_unit'],
+          message: 'Sale units are only valid for poultry-manure invoices',
+        });
+      }
       if (!item.egg_unit) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
@@ -49,12 +71,30 @@ const body = z.object({
           message: 'Egg quantity is required for egg sales',
         });
       }
-    } else if (item.egg_unit != null || item.egg_quantity != null) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['items', index, 'egg_unit'],
-        message: 'Egg billing fields are only valid for egg-sale invoices',
-      });
+    } else {
+      if (item.egg_unit != null || item.egg_quantity != null) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'egg_unit'],
+          message: 'Egg billing fields are only valid for egg-sale invoices',
+        });
+      }
+      if (invoice.invoice_type === 'poultry_manure_sale' && !item.sale_unit) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'sale_unit'],
+          message: 'Choose a sale unit for poultry manure',
+        });
+      } else if (
+        invoice.invoice_type !== 'poultry_manure_sale' &&
+        item.sale_unit != null
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'sale_unit'],
+          message: 'Sale units are only valid for poultry-manure invoices',
+        });
+      }
     }
   });
 });

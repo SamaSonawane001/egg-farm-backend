@@ -1,7 +1,12 @@
-import { query, withTx } from '../config/db';
+import { pool, query, withTx } from '../config/db';
+import { runWithFarmContext } from '../config/farmContext';
 import { HttpError } from '../utils/httpError';
 import { round2 } from '../utils/http';
 import { buildInvoicePdf } from './pdf.service';
+import {
+  findOrCreateCustomer,
+  normalizeCustomerPhone,
+} from './customer.service';
 
 export const list = async (ownerId: string, limit = 10, offset = 0) => {
   const [data, count] = await Promise.all([
@@ -12,7 +17,8 @@ export const list = async (ownerId: string, limit = 10, offset = 0) => {
             (SELECT COUNT(*) FROM invoice_items it WHERE it.invoice_id=i.id) AS items_count,
             COALESCE((SELECT json_agg(json_build_object(
               'description',it.description,'quantity',it.quantity,'unit_price',it.unit_price,
-              'amount',it.amount,'egg_quantity',it.egg_quantity,'egg_unit',it.egg_unit
+              'amount',it.amount,'egg_quantity',it.egg_quantity,'egg_unit',it.egg_unit,
+              'sale_unit',it.sale_unit
             ) ORDER BY it.id) FROM invoice_items it
               WHERE it.invoice_id=i.id AND it.owner_id=i.owner_id),'[]'::json) AS items
      FROM invoices i WHERE i.owner_id=$1 ORDER BY i.created_at DESC, i.id DESC
@@ -83,6 +89,9 @@ export async function create(ownerId: string, d: any) {
     let eggQuantity = null;
     let amount: number;
     if (d.invoice_type === 'egg_sale') {
+      if (it.sale_unit != null) {
+        throw new HttpError(400, 'Sale units are only valid for poultry-manure invoices');
+      }
       if (!['eggs', 'tray'].includes(it.egg_unit)) {
         throw new HttpError(400, 'Each egg-sale item must include a valid egg billing unit');
       }
@@ -102,6 +111,15 @@ export async function create(ownerId: string, d: any) {
     } else {
       if (it.egg_unit != null || it.egg_quantity != null) {
         throw new HttpError(400, 'Egg billing fields are only valid for egg-sale invoices');
+      }
+      if (
+        d.invoice_type === 'poultry_manure_sale' &&
+        !['bag', 'tractor_trolley', 'ton'].includes(it.sale_unit)
+      ) {
+        throw new HttpError(400, 'Each poultry-manure item must include a valid sale unit');
+      }
+      if (d.invoice_type !== 'poultry_manure_sale' && it.sale_unit != null) {
+        throw new HttpError(400, 'Sale units are only valid for poultry-manure invoices');
       }
       amount = round2(Number(it.quantity) * Number(it.unit_price));
     }
@@ -126,15 +144,17 @@ export async function create(ownerId: string, d: any) {
         throw new HttpError(400, `Cannot bill more than available stock (Max available: ${stock.available_eggs})`);
       }
     }
-    const phone = String(d.customer_mobile).replace(/\D/g, '');
-    if (phone.length !== 10) throw new HttpError(400, 'Customer mobile must contain 10 digits');
-    const customer = await c.query(
-      `INSERT INTO customers(owner_id,name,phone) VALUES($1,$2,$3)
-       ON CONFLICT(owner_id,phone) DO UPDATE SET name=EXCLUDED.name
-       RETURNING id`,
-      [ownerId, d.customer_name.trim(), phone],
+    const rawPhone = String(d.customer_mobile ?? '').trim();
+    const phone = normalizeCustomerPhone(rawPhone);
+    if (rawPhone && !phone) {
+      throw new HttpError(400, 'Customer mobile must contain a valid 10-digit number');
+    }
+    const customerId = await findOrCreateCustomer(
+      c,
+      ownerId,
+      d.customer_name.trim(),
+      phone,
     );
-    const customerId = customer.rows[0].id;
     const seqRow = await c.query('SELECT COALESCE(MAX(invoice_seq),0)+1 AS n FROM invoices WHERE owner_id=$1 AND invoice_year=$2', [ownerId, year]);
     const seq = Number(seqRow.rows[0].n);
     const no = `INV-${year}-${String(seq).padStart(4, '0')}`;
@@ -144,14 +164,15 @@ export async function create(ownerId: string, d: any) {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::numeric,$14,$15,
            CASE WHEN $15='paid' THEN NOW() ELSE NULL END,
            CASE WHEN $15='paid' THEN $13::numeric ELSE 0::numeric END) RETURNING id`,
-      [ownerId, customerId, year, seq, no, d.invoice_type, d.customer_name, phone, d.invoice_date, subtotal, d.tax_percent, taxAmount, grand, d.notes, d.payment_status]
+      [ownerId, customerId, year, seq, no, d.invoice_type, d.customer_name, phone || null, d.invoice_date, subtotal, d.tax_percent, taxAmount, grand, d.notes, d.payment_status]
     );
     const invId = ins.rows[0].id;
     for (const it of items) {
       await c.query(
-        'INSERT INTO invoice_items (owner_id,invoice_id,description,quantity,unit_price,amount,egg_quantity,egg_unit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+        'INSERT INTO invoice_items (owner_id,invoice_id,description,quantity,unit_price,amount,egg_quantity,egg_unit,sale_unit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
         [ownerId, invId, it.description, it.quantity, it.unit_price, it.amount,
-          eggQuantityForItem(it, d.invoice_type), d.invoice_type === 'egg_sale' ? it.egg_unit : null]
+          eggQuantityForItem(it, d.invoice_type), d.invoice_type === 'egg_sale' ? it.egg_unit : null,
+          d.invoice_type === 'poultry_manure_sale' ? it.sale_unit : null]
       );
     }
     if (d.payment_status === 'paid' && grand > 0) {
@@ -264,8 +285,14 @@ export async function remove(ownerId: string, id: string) {
 export async function pdfFor(ownerId: string, id: string) {
   const inv = await getOne(ownerId, id);
   const farm = (await query(
-    'SELECT farm_name, owner_name, mobile, address, avatar_url, signature_url, payment_qr_url FROM users WHERE id=$1',
-    [ownerId],
+    `SELECT f.name AS farm_name,u.owner_name,u.mobile,f.address,
+            f.avatar_url AS logo_url,
+            f.signature_url,f.payment_qr_url
+     FROM farms f JOIN users u ON u.id=f.owner_user_id
+     WHERE f.owner_user_id=$1 AND (f.is_primary=TRUE OR f.id=$2)
+     ORDER BY f.is_primary DESC
+     LIMIT 1`,
+    [ownerId, inv.farm_id],
   ))[0];
   return {
     buffer: await buildInvoicePdf(inv, inv.items, farm, ownerId),
@@ -277,10 +304,31 @@ export async function pdfFor(ownerId: string, id: string) {
 /** Public invoice links accept the invoice UUID and retain compatibility with older share tokens. */
 export async function pdfByPublicIdOrToken(idOrToken: string) {
   if (!/^[0-9a-f-]{36}$/i.test(idOrToken)) throw new HttpError(404, 'Invoice not found');
-  let r = await query('SELECT id, owner_id FROM invoices WHERE id=$1', [idOrToken]);
-  if (!r.length) {
-    r = await query('SELECT id, owner_id FROM invoices WHERE share_token=$1', [idOrToken]);
+  const client = await pool.connect();
+  let invoice: { id: string; owner_id: string; farm_id: string } | undefined;
+  try {
+    await client.query('BEGIN');
+    await client.query('SET LOCAL ROLE egg_farm_runtime');
+    await client.query(
+      "SELECT set_config('app.public_invoice_id',$1,true)",
+      [idOrToken],
+    );
+    const result = await client.query<{ id: string; owner_id: string; farm_id: string }>(
+      `SELECT id,owner_id,farm_id FROM invoices
+       WHERE id=$1::uuid OR share_token=$1::uuid LIMIT 1`,
+      [idOrToken],
+    );
+    invoice = result.rows[0];
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-  if (!r.length) throw new HttpError(404, 'Invoice not found');
-  return pdfFor(r[0].owner_id, r[0].id);
+  if (!invoice) throw new HttpError(404, 'Invoice not found');
+  return runWithFarmContext(
+    { ownerId: invoice.owner_id, farmId: invoice.farm_id, farmIds: [invoice.farm_id] },
+    () => pdfFor(invoice.owner_id, invoice.id),
+  );
 }

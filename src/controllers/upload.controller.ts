@@ -10,7 +10,7 @@ export const avatar = asyncHandler(async (req, res) => {
     }
 
     const avatarUrl = await uploadProfileAvatar(req.ownerId, req.file);
-    const user = await authService.updateProfile(req.ownerId, { avatar_url: avatarUrl });
+    const user = await authService.updateProfile(req.ownerId, req.farmId, { avatar_url: avatarUrl });
     res.json({ success: true, avatarUrl, user });
   } catch (error) {
     console.error('Avatar route failed:', error);
