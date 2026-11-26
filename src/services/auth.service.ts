@@ -21,12 +21,6 @@ END`;
 const DEV_BYPASS_OTP = '000000';
 let signupOtpClient: SupabaseClient | undefined;
 
-const USER_COLS = `
-  u.id, u.mobile, u.owner_name, f.name AS farm_name, f.id AS farm_id,
-  f.is_primary, f.avatar_url, f.signature_url, f.payment_qr_url, f.address,
-  f.low_stock_threshold, f.kg_per_bag, f.default_tax_percent, f.eggs_per_tray,
-  u.shared_inventory_enabled`;
-
 const sign = (ownerId: string) => jwt.sign({ ownerId }, env.jwtSecret, { expiresIn: env.jwtExpires as any });
 
 function getSignupOtpClient(): SupabaseClient {
@@ -308,17 +302,42 @@ export async function login(mobile: string, password: string) {
 export async function getUser(ownerId: string, farmId?: string): Promise<User> {
   const selectedFarmId =
     farmId?.toLowerCase() === 'all' ? null : farmId ?? null;
-  const rows = await query<User>(
-    `SELECT ${USER_COLS}
-     FROM users u
-     JOIN farms f ON f.owner_user_id=u.id
-     WHERE u.id=$1::uuid AND f.owner_user_id=$1::uuid
-       AND (($2::uuid IS NULL AND f.is_primary) OR f.id=$2::uuid)
-     ORDER BY f.is_primary DESC LIMIT 1`,
-    [ownerId, selectedFarmId],
-  );
-  if (!rows.length) throw new HttpError(404, 'Account or farm not found');
-  return rows[0];
+  const [accounts, farms] = await Promise.all([
+    query<Pick<User, 'id' | 'mobile' | 'owner_name' | 'shared_inventory_enabled'>>(
+      `SELECT id,mobile,owner_name,shared_inventory_enabled
+       FROM users WHERE id=$1::uuid`,
+      [ownerId],
+    ),
+    query<
+      Pick<
+        User,
+        | 'farm_id'
+        | 'farm_name'
+        | 'is_primary'
+        | 'avatar_url'
+        | 'signature_url'
+        | 'payment_qr_url'
+        | 'address'
+        | 'low_stock_threshold'
+        | 'kg_per_bag'
+        | 'default_tax_percent'
+        | 'eggs_per_tray'
+      >
+    >(
+      `SELECT f.id AS farm_id,f.name AS farm_name,f.is_primary,f.avatar_url,
+              f.signature_url,f.payment_qr_url,f.address,f.low_stock_threshold,
+              f.kg_per_bag,f.default_tax_percent,f.eggs_per_tray
+       FROM farms f
+       WHERE ($1::uuid IS NULL OR f.id=$1::uuid)
+         AND (f.owner_user_id=$2::uuid OR to_jsonb(f)->>'user_id'=$2::text)
+       ORDER BY f.is_primary DESC,f.created_at,f.id LIMIT 1`,
+      [selectedFarmId, ownerId],
+    ),
+  ]);
+  if (!accounts.length || !farms.length) {
+    throw new HttpError(404, 'Account or farm not found');
+  }
+  return { ...accounts[0], ...farms[0] };
 }
 
 async function consolidateSharedInventory(
@@ -465,9 +484,10 @@ export async function updateProfile(
 ) {
   const updatedFarmId = await withTx(async (client) => {
     const primary = await client.query<{ id: string }>(
-      `SELECT id FROM farms
-       WHERE owner_user_id=$1 AND is_primary=TRUE
-       ORDER BY created_at,id LIMIT 1 FOR UPDATE`,
+    `SELECT f.id FROM farms f
+     WHERE (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+       AND f.is_primary=TRUE
+     ORDER BY f.created_at,f.id LIMIT 1 FOR UPDATE`,
       [ownerId],
     );
     if (!primary.rows.length) throw new HttpError(404, 'Primary farm not found');
@@ -478,7 +498,9 @@ export async function updateProfile(
       );
       if (i.shared_inventory_enabled && !current.rows[0]?.shared_inventory_enabled) {
         const farms = await client.query<{ id: string }>(
-          'SELECT id FROM farms WHERE owner_user_id=$1 ORDER BY is_primary DESC,created_at,id',
+          `SELECT f.id FROM farms f
+           WHERE f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+           ORDER BY f.is_primary DESC,f.created_at,f.id`,
           [ownerId],
         );
         if (farms.rows.length < 2) {
@@ -499,7 +521,9 @@ export async function updateProfile(
         current.rows[0]?.shared_inventory_enabled
       ) {
         const farms = await client.query<{ id: string }>(
-          'SELECT id FROM farms WHERE owner_user_id=$1 ORDER BY is_primary DESC,created_at,id',
+          `SELECT f.id FROM farms f
+           WHERE f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+           ORDER BY f.is_primary DESC,f.created_at,f.id`,
           [ownerId],
         );
         await setFarmSettings(client, {
@@ -530,10 +554,12 @@ export async function updateProfile(
       await client.query('UPDATE users SET owner_name=$2 WHERE id=$1', [ownerId, i.owner_name]);
     }
     const identity = await client.query(
-      `UPDATE farms SET
+      `UPDATE farms f SET
          name=COALESCE($3,name), address=COALESCE($4,address),
          avatar_url=COALESCE($5,avatar_url)
-       WHERE owner_user_id=$1 AND id=$2 RETURNING id`,
+       WHERE f.id=$2::uuid
+         AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+       RETURNING f.id`,
       [ownerId, primary.rows[0].id, i.farm_name ?? null, i.address ?? null, i.avatar_url ?? null],
     );
     if (!identity.rowCount) throw new HttpError(404, 'Primary farm not found');
@@ -541,12 +567,14 @@ export async function updateProfile(
     const settingsFarmId =
       activeFarmId === 'all' ? primary.rows[0].id : activeFarmId;
     const settings = await client.query(
-      `UPDATE farms SET
+      `UPDATE farms f SET
          low_stock_threshold=COALESCE($3,low_stock_threshold),
          kg_per_bag=COALESCE($4,kg_per_bag),
          default_tax_percent=COALESCE($5,default_tax_percent),
          eggs_per_tray=COALESCE($6,eggs_per_tray)
-       WHERE owner_user_id=$1 AND id=$2 RETURNING id`,
+       WHERE f.id=$2::uuid
+         AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+       RETURNING f.id`,
       [ownerId, settingsFarmId, i.low_stock_threshold ?? null,
         i.kg_per_bag ?? null, i.default_tax_percent ?? null, i.eggs_per_tray ?? null],
     );
@@ -563,13 +591,18 @@ export async function updateFarmAsset(
 ) {
   const column = asset === 'signature' ? 'signature_url' : 'payment_qr_url';
   const farm = await query<{ id: string }>(
-    `SELECT id FROM farms WHERE owner_user_id=$1 AND is_primary=TRUE
-     ORDER BY created_at,id LIMIT 1`,
+    `SELECT f.id FROM farms f
+     WHERE (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+       AND f.is_primary=TRUE
+     ORDER BY f.created_at,f.id LIMIT 1`,
     [ownerId],
   );
   if (!farm.length) throw new HttpError(404, 'Primary farm not found');
   const rows = await query(
-    `UPDATE farms SET ${column}=$2 WHERE owner_user_id=$1 AND id=$3 RETURNING id`,
+    `UPDATE farms f SET ${column}=$2
+     WHERE f.id=$3::uuid
+       AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+     RETURNING f.id`,
     [ownerId, url, farm[0].id],
   );
   if (!rows.length) throw new HttpError(404, 'Farm profile not found');

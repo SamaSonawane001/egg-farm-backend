@@ -12,6 +12,7 @@ const POULTRY_MANURE_SCHEMA_VERSION = 7;
 const SUBSCRIPTION_SCHEMA_VERSION = 9;
 const FARM_PROFILE_SCHEMA_VERSION = 10;
 const FARM_OWNERSHIP_SCHEMA_VERSION = 11;
+const FARM_OWNER_NORMALIZATION_SCHEMA_VERSION = 12;
 
 export async function runMigrations(): Promise<void> {
   const existingIdType = await pool.query<{ id_type: string }>(
@@ -116,6 +117,13 @@ export async function runMigrations(): Promise<void> {
       'utf8',
     );
     await pool.query(farmOwnershipMigration);
+  }
+  if (appliedVersion < FARM_OWNER_NORMALIZATION_SCHEMA_VERSION) {
+    const farmOwnerNormalizationMigration = fs.readFileSync(
+      path.join(__dirname, '../../sql/farm_owner_normalization.sql'),
+      'utf8',
+    );
+    await pool.query(farmOwnerNormalizationMigration);
   }
   console.log('✔ Database schema is up to date');
 }
