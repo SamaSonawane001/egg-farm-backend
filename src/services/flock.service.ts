@@ -1,5 +1,7 @@
-import { query } from '../config/db';
+import { PoolClient } from 'pg';
+import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
+import { resolveFarmId } from './farmId.service';
 
 export async function ensureBatch(ownerId: string, batchId: string | null | undefined) {
   if (batchId == null) return;
@@ -10,14 +12,20 @@ export async function ensureBatch(ownerId: string, batchId: string | null | unde
 async function liveBirds(
   ownerId: string,
   batchId: string,
-  excludeLogId: string | null = null
+  excludeLogId: string | null = null,
+  client?: PoolClient,
 ): Promise<number> {
-  const r = await query(
+  const sql =
     `SELECT b.quantity - COALESCE((SELECT SUM(dead_count) FROM mortality_logs
         WHERE batch_id=b.id AND owner_id=$2 AND ($3::uuid IS NULL OR id<>$3)),0) AS live
-     FROM flock_batches b WHERE b.id=$1 AND b.owner_id=$2`,
-    [batchId, ownerId, excludeLogId]
-  );
+     FROM flock_batches b WHERE b.id=$1 AND b.owner_id=$2`;
+  const params = [batchId, ownerId, excludeLogId];
+  const r = client
+    ? (await client.query(sql, params)).rows
+    : await query(
+        sql,
+        params,
+      );
   if (!r.length) throw new HttpError(404, 'Flock batch not found');
   return r[0].live;
 }
@@ -33,12 +41,15 @@ export const listBatches = (ownerId: string) =>
   );
 
 export async function createBatch(ownerId: string, d: any) {
-  const r = await query(
-    `INSERT INTO flock_batches (owner_id,batch_name,arrival_date,quantity,unit_price,notes)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-    [ownerId, d.batch_name, d.arrival_date, d.quantity, d.unit_price, d.notes]
-  );
-  return r[0];
+  return withTx(async (client) => {
+    const farmId = await resolveFarmId(client, ownerId);
+    const r = await client.query(
+      `INSERT INTO flock_batches (owner_id,farm_id,batch_name,arrival_date,quantity,unit_price,notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [ownerId, farmId, d.batch_name, d.arrival_date, d.quantity, d.unit_price, d.notes]
+    );
+    return r.rows[0];
+  });
 }
 
 export async function updateBatch(ownerId: string, id: string, d: any) {
@@ -67,13 +78,17 @@ export const listMortality = (ownerId: string, batchId?: string) =>
   );
 
 export async function createMortality(ownerId: string, d: any) {
-  const live = await liveBirds(ownerId, d.batch_id);
-  if (d.dead_count > live) throw new HttpError(400, `Dead count exceeds live birds in this batch (${live})`);
-  const r = await query(
-    `INSERT INTO mortality_logs (owner_id,batch_id,log_date,dead_count,cause) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-    [ownerId, d.batch_id, d.log_date, d.dead_count, d.cause]
-  );
-  return r[0];
+  return withTx(async (client) => {
+    const farmId = await resolveFarmId(client, ownerId);
+    const live = await liveBirds(ownerId, d.batch_id, null, client);
+    if (d.dead_count > live) throw new HttpError(400, `Dead count exceeds live birds in this batch (${live})`);
+    const r = await client.query(
+      `INSERT INTO mortality_logs (owner_id,farm_id,batch_id,log_date,dead_count,cause)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [ownerId, farmId, d.batch_id, d.log_date, d.dead_count, d.cause]
+    );
+    return r.rows[0];
+  });
 }
 
 export async function updateMortality(ownerId: string, id: string, d: any) {

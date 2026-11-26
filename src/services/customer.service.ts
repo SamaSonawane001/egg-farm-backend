@@ -1,6 +1,7 @@
 import { PoolClient } from 'pg';
 import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
+import { resolveFarmId } from './farmId.service';
 
 export function normalizeCustomerPhone(value: unknown): string {
   let digits = String(value ?? '').replace(/\D/g, '');
@@ -16,20 +17,21 @@ export function normalizeCustomerPhone(value: unknown): string {
 export async function findOrCreateCustomer(
   client: PoolClient,
   ownerId: string,
+  farmId: string,
   name: string,
   normalizedPhone: string,
 ): Promise<string> {
   if (normalizedPhone) {
     const result = await client.query(
-      `INSERT INTO customers(owner_id,name,phone,normalized_phone)
-       VALUES($1,$2,$3,$3)
+      `INSERT INTO customers(owner_id,farm_id,name,phone,normalized_phone)
+       VALUES($1,$2,$3,$4,$4)
        ON CONFLICT (farm_id,normalized_phone) WHERE normalized_phone <> ''
        DO UPDATE SET name=CASE
          WHEN btrim(customers.name)='' THEN EXCLUDED.name
          ELSE customers.name
        END
        RETURNING id`,
-      [ownerId, name, normalizedPhone],
+      [ownerId, farmId, name, normalizedPhone],
     );
     return result.rows[0].id;
   }
@@ -37,19 +39,19 @@ export async function findOrCreateCustomer(
   const existing = await client.query(
     `SELECT id FROM customers
      WHERE owner_id=$1
-       AND farm_id=NULLIF(current_setting('app.farm_id',true),'')::uuid
-       AND lower(trim(name))=lower(trim($2))
+       AND farm_id=$2
+       AND lower(trim(name))=lower(trim($3))
      ORDER BY created_at,id
      LIMIT 1
      FOR UPDATE`,
-    [ownerId, name],
+    [ownerId, farmId, name],
   );
   if (existing.rows.length) return existing.rows[0].id;
 
   const created = await client.query(
-    `INSERT INTO customers(owner_id,name,phone,normalized_phone)
-     VALUES($1,$2,'','') RETURNING id`,
-    [ownerId, name],
+    `INSERT INTO customers(owner_id,farm_id,name,phone,normalized_phone)
+     VALUES($1,$2,$3,'','') RETURNING id`,
+    [ownerId, farmId, name],
   );
   return created.rows[0].id;
 }
@@ -223,6 +225,7 @@ export async function receiveCustomerPayment(
 ) {
   return withTx(async (client: PoolClient) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+    const farmId = await resolveFarmId(client, ownerId);
     const customer = await client.query(
       'SELECT id FROM customers WHERE owner_id=$1 AND id=$2 FOR UPDATE',
       [ownerId, customerId],
@@ -275,9 +278,9 @@ export async function receiveCustomerPayment(
       );
       const result = await client.query(
         `INSERT INTO customer_payments
-         (owner_id,customer_id,invoice_id,amount_paid,payment_mode,note,payment_date)
-         VALUES($1,$2,$3,$4::numeric,$5,$6,$7) RETURNING *`,
-        [ownerId, customerId, invoice.id, applied, d.payment_mode, d.note ?? null, d.payment_date],
+         (owner_id,farm_id,customer_id,invoice_id,amount_paid,payment_mode,note,payment_date)
+         VALUES($1,$2,$3,$4,$5::numeric,$6,$7,$8) RETURNING *`,
+        [ownerId, farmId, customerId, invoice.id, applied, d.payment_mode, d.note ?? null, d.payment_date],
       );
       payments.push(result.rows[0]);
       remaining -= appliedCents;

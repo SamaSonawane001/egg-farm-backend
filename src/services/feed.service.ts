@@ -3,6 +3,7 @@ import { query, withTx } from '../config/db';
 import { getFarmContext } from '../config/farmContext';
 import { HttpError } from '../utils/httpError';
 import { ensureBatch } from './flock.service';
+import { resolveFarmId } from './farmId.service';
 
 export async function getStock(ownerId: string) {
   const farmContext = getFarmContext();
@@ -183,12 +184,15 @@ export async function createProduct(ownerId: string, name: string) {
   if (name.trim().toLowerCase() === 'ready feed') {
     throw new HttpError(409, 'Ready Feed is a permanent system product');
   }
-  const rows = await query(
-    'INSERT INTO feed_products(owner_id,name) VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING id,name',
-    [ownerId, name.trim()]
-  );
-  if (!rows.length) throw new HttpError(409, 'A feed product with this name already exists');
-  return rows[0];
+  return withTx(async (client) => {
+    const farmId = await resolveFarmId(client, ownerId);
+    const rows = await client.query(
+      'INSERT INTO feed_products(owner_id,farm_id,name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id,name',
+      [ownerId, farmId, name.trim()]
+    );
+    if (!rows.rows.length) throw new HttpError(409, 'A feed product with this name already exists');
+    return rows.rows[0];
+  });
 }
 
 export async function updateProduct(ownerId: string, id: string, name: string) {
@@ -230,19 +234,20 @@ export async function deleteProduct(ownerId: string, id: string) {
 const lockOwner = (client: PoolClient, ownerId: string) => client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
 
 async function ensureReadyFeedInTx(client: PoolClient, ownerId: string) {
+  const farmId = await resolveFarmId(client, ownerId);
   const result = await client.query(
-    `INSERT INTO feed_products(owner_id,name)
-     VALUES($1,'Ready Feed')
+    `INSERT INTO feed_products(owner_id,farm_id,name)
+     VALUES($1,$2,'Ready Feed')
      ON CONFLICT DO NOTHING
      RETURNING id,name`,
-    [ownerId],
+    [ownerId, farmId],
   );
   if (result.rows.length) return result.rows[0];
   const existing = await client.query(
     `SELECT id,name FROM feed_products
-     WHERE owner_id=$1 AND lower(trim(name))='ready feed'
+     WHERE owner_id=$1 AND farm_id=$2 AND lower(trim(name))='ready feed'
      FOR UPDATE`,
-    [ownerId],
+    [ownerId, farmId],
   );
   if (!existing.rows.length) throw new HttpError(500, 'Could not create or find Ready Feed');
   return existing.rows[0];
@@ -282,6 +287,7 @@ function assertEnoughStock(remaining: number, requested: number) {
 export async function createPurchase(ownerId: string, d: any) {
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
+    const farmId = await resolveFarmId(client, ownerId);
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
     if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
     if (product.rows[0].name.trim().toLowerCase() === 'ready feed') {
@@ -302,10 +308,10 @@ export async function createPurchase(ownerId: string, d: any) {
     const costPerBag = bags > 0 ? Math.round((totalCost / bags) * 100) / 100 : 0;
     const r = await client.query(
       `INSERT INTO feed_purchases
-       (owner_id,feed_product_id,delivery_date,feed_type,bags,cost_per_bag,total_cost,
+       (owner_id,farm_id,feed_product_id,delivery_date,feed_type,bags,cost_per_bag,total_cost,
         entered_quantity,entered_unit,rate_per_unit,kg_per_bag)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [ownerId, d.feed_product_id, d.delivery_date, product.rows[0].name,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [ownerId, farmId, d.feed_product_id, d.delivery_date, product.rows[0].name,
         bags, costPerBag, totalCost, enteredQuantity, enteredUnit, enteredRate, kgPerBag]
     );
     return r.rows[0];
@@ -385,6 +391,7 @@ export async function createUsage(ownerId: string, d: any) {
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
+    const farmId = await resolveFarmId(client, ownerId);
     const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
     const product = await client.query('SELECT name FROM feed_products WHERE id=$1 AND owner_id=$2', [d.feed_product_id, ownerId]);
     if (!product.rows.length) throw new HttpError(404, 'Feed product not found');
@@ -392,9 +399,9 @@ export async function createUsage(ownerId: string, d: any) {
     const remaining = await remainingForProduct(client, ownerId, d.feed_product_id);
     assertEnoughStock(remaining, bags);
     const r = await client.query(
-      `INSERT INTO feed_usage (owner_id,batch_id,usage_date,quantity,unit,bags_equivalent,feed_type,feed_product_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [ownerId, d.batch_id, d.usage_date, d.quantity, d.unit, bags, product.rows[0].name, d.feed_product_id]
+      `INSERT INTO feed_usage (owner_id,farm_id,batch_id,usage_date,quantity,unit,bags_equivalent,feed_type,feed_product_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [ownerId, farmId, d.batch_id, d.usage_date, d.quantity, d.unit, bags, product.rows[0].name, d.feed_product_id]
     );
     return r.rows[0];
   });
@@ -506,6 +513,7 @@ async function saveReadyFeedPreparation(
   if (!activeFarmId) {
     throw new HttpError(409, 'Select an individual farm to prepare feed');
   }
+  const farmId = await resolveFarmId(client, ownerId);
   const inventoryMode = await client.query<{ shared_inventory_enabled: boolean }>(
     'SELECT shared_inventory_enabled FROM users WHERE id=$1',
     [ownerId],
@@ -688,9 +696,9 @@ async function saveReadyFeedPreparation(
     );
   } else {
     const batch = await client.query(
-      `INSERT INTO feed_preparations(owner_id,feed_product_id,preparation_date,total_quantity_kg,remarks)
-       VALUES($1,$2,$3,$4,$5) RETURNING id`,
-      [ownerId, readyFeedId, date, totalKg, description],
+      `INSERT INTO feed_preparations(owner_id,farm_id,feed_product_id,preparation_date,total_quantity_kg,remarks)
+       VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [ownerId, farmId, readyFeedId, date, totalKg, description],
     );
     batchId = batch.rows[0].id;
   }
@@ -698,37 +706,37 @@ async function saveReadyFeedPreparation(
     if (source.sourceType === 'feed') {
       const bagsEquivalent = Math.round((source.quantityKg / kgPerBag) * 100000) / 100000;
       await client.query(
-        `INSERT INTO feed_preparation_items(owner_id,preparation_id,source_type,feed_product_id,quantity_kg)
-         VALUES($1,$2,'feed',$3,$4)`,
-        [ownerId, batchId, source.id, source.quantityKg],
+        `INSERT INTO feed_preparation_items(owner_id,farm_id,preparation_id,source_type,feed_product_id,quantity_kg)
+         VALUES($1,$2,$3,'feed',$4,$5)`,
+        [ownerId, farmId, batchId, source.id, source.quantityKg],
       );
       await client.query(
         `INSERT INTO feed_usage
-         (owner_id,usage_date,quantity,unit,bags_equivalent,feed_type,feed_product_id,remarks,preparation_id)
-         VALUES($1,$2,$3,'kg',$4,$5,$6,'Used in Ready Feed batch',$7)`,
-        [ownerId, date, source.quantityKg, bagsEquivalent, source.name, source.id, batchId],
+         (owner_id,farm_id,usage_date,quantity,unit,bags_equivalent,feed_type,feed_product_id,remarks,preparation_id)
+         VALUES($1,$2,$3,$4,'kg',$5,$6,$7,'Used in Ready Feed batch',$8)`,
+        [ownerId, farmId, date, source.quantityKg, bagsEquivalent, source.name, source.id, batchId],
       );
     } else {
       await client.query(
-        `INSERT INTO feed_preparation_items(owner_id,preparation_id,source_type,raw_material_id,quantity_kg)
-         VALUES($1,$2,'raw_material',$3,$4)`,
-        [ownerId, batchId, source.id, source.quantityKg],
+        `INSERT INTO feed_preparation_items(owner_id,farm_id,preparation_id,source_type,raw_material_id,quantity_kg)
+         VALUES($1,$2,$3,'raw_material',$4,$5)`,
+        [ownerId, farmId, batchId, source.id, source.quantityKg],
       );
       await client.query(
         `INSERT INTO raw_material_logs
          (owner_id,farm_id,is_shared_pool,material_id,transaction_type,quantity,unit,transaction_date,
           remarks,preparation_id,rate_per_unit,total_amount)
          VALUES($1,$2,$3,$4,'OUTWARD_PROCESSING',$5,'kg',$6,'Used in Ready Feed batch',$7,$8,$9)`,
-        [ownerId, activeFarmId, source.sharedPool, source.id, source.quantityKg,
+        [ownerId, farmId, source.sharedPool, source.id, source.quantityKg,
           date, batchId, source.ratePerKg || null, source.totalCost || null],
       );
     }
   }
   await client.query(
     `INSERT INTO feed_purchases
-     (owner_id,delivery_date,feed_type,feed_product_id,bags,cost_per_bag,total_cost,source,preparation_id)
-     VALUES($1,$2,'Ready Feed',$3,$4,$5,$6,'PROCESSING',$7)`,
-    [ownerId, date, readyFeedId, totalBags,
+     (owner_id,farm_id,delivery_date,feed_type,feed_product_id,bags,cost_per_bag,total_cost,source,preparation_id)
+     VALUES($1,$2,$3,'Ready Feed',$4,$5,$6,$7,'PROCESSING',$8)`,
+    [ownerId, farmId, date, readyFeedId, totalBags,
       totalBags > 0 ? Math.round((preparedFeedCost / totalBags) * 100) / 100 : 0,
       preparedFeedCost, batchId],
   );

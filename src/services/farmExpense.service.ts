@@ -1,5 +1,6 @@
-import { query } from '../config/db';
+import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
+import { resolveFarmId } from './farmId.service';
 
 const categories = [
   'farm_labour_salary',
@@ -51,14 +52,17 @@ export async function listFarmExpenses(
 }
 
 export async function createFarmExpense(ownerId: string, d: any) {
-  const [row] = await query(
-    `INSERT INTO farm_expenses
-      (owner_id,category,person_or_vendor,description,workers_count,amount,payment_mode,expense_date)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-    [ownerId, d.category, d.person_or_vendor, d.description, d.workers_count,
-      d.amount, d.payment_mode, d.expense_date],
-  );
-  return row;
+  return withTx(async (client) => {
+    const farmId = await resolveFarmId(client, ownerId);
+    const result = await client.query(
+      `INSERT INTO farm_expenses
+        (owner_id,farm_id,category,person_or_vendor,description,workers_count,amount,payment_mode,expense_date)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [ownerId, farmId, d.category, d.person_or_vendor, d.description, d.workers_count,
+        d.amount, d.payment_mode, d.expense_date],
+    );
+    return result.rows[0];
+  });
 }
 
 export async function updateFarmExpense(ownerId: string, id: string, d: any) {

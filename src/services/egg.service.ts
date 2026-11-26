@@ -2,6 +2,7 @@ import { PoolClient } from 'pg';
 import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
 import { ensureBatch } from './flock.service';
+import { resolveFarmId } from './farmId.service';
 
 function validate(d: { trays_count: number; loose_eggs: number; damaged_eggs: number }, eggsPerTray: number) {
   const totalEggs = d.trays_count * eggsPerTray + d.loose_eggs;
@@ -116,22 +117,23 @@ export async function create(ownerId: string, d: { collection_date: string; batc
   await ensureBatch(ownerId, d.batch_id);
   return withTx(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+    const farmId = await resolveFarmId(client, ownerId);
     const settings = await client.query(
       `SELECT f.eggs_per_tray FROM farms f
-       WHERE f.id=NULLIF(current_setting('app.farm_id',true),'')::uuid
+       WHERE f.id=$2::uuid
          AND (f.owner_user_id=$1::uuid
            OR to_jsonb(f)->>'user_id'=$1::text
            OR to_jsonb(f)->>'owner_id'=$1::text)`,
-      [ownerId],
+      [ownerId, farmId],
     );
     if (!settings.rows.length) throw new HttpError(404, 'Farm profile not found');
     const eggsPerTray = Number(settings.rows[0].eggs_per_tray);
     const totalEggs = validate(d, eggsPerTray);
     const r = await client.query(
       `INSERT INTO egg_production
-         (owner_id,batch_id,collection_date,trays_count,loose_eggs,eggs_per_tray_used,total_eggs,damaged_eggs)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [ownerId, d.batch_id, d.collection_date, d.trays_count, d.loose_eggs, eggsPerTray, totalEggs, d.damaged_eggs]
+         (owner_id,farm_id,batch_id,collection_date,trays_count,loose_eggs,eggs_per_tray_used,total_eggs,damaged_eggs)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [ownerId, farmId, d.batch_id, d.collection_date, d.trays_count, d.loose_eggs, eggsPerTray, totalEggs, d.damaged_eggs]
     );
     return r.rows[0];
   });

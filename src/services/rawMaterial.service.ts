@@ -487,11 +487,12 @@ export async function processMaterials(ownerId: string, d: any) {
       }
       const operation = await client.query(
         `INSERT INTO raw_material_processing
-         (owner_id,processing_date,feed_product_id,quantity_bags,
+         (owner_id,farm_id,processing_date,feed_product_id,quantity_bags,
           produced_quantity,produced_unit,remarks)
-         VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
         [
           ownerId,
+          inventory.activeFarmId,
           d.date,
           feed.rows[0].id,
           feedBags,
@@ -523,11 +524,12 @@ export async function processMaterials(ownerId: string, d: any) {
       );
       await client.query(
         `INSERT INTO feed_purchases
-         (owner_id,delivery_date,feed_type,feed_product_id,bags,cost_per_bag,
+         (owner_id,farm_id,delivery_date,feed_type,feed_product_id,bags,cost_per_bag,
           total_cost,source,processing_id)
-         VALUES($1,$2,$3,$4,$5,$6,$7,'PROCESSING',$8)`,
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,'PROCESSING',$9)`,
         [
           ownerId,
+          inventory.activeFarmId,
           d.date,
           feed.rows[0].name,
           feed.rows[0].id,

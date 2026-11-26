@@ -8,6 +8,7 @@ import {
   normalizeCustomerPhone,
 } from './customer.service';
 import { assertCanCreateInvoice } from './subscription.service';
+import { resolveFarmId } from './farmId.service';
 
 export const list = async (ownerId: string, limit = 10, offset = 0) => {
   const [data, count] = await Promise.all([
@@ -132,6 +133,7 @@ export async function create(ownerId: string, d: any) {
 
   const id = await withTx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+    const farmId = await resolveFarmId(c, ownerId);
     await assertCanCreateInvoice(c, ownerId);
     const year = new Date().getFullYear();
     const stock = await getEggStock(ownerId, c);
@@ -154,6 +156,7 @@ export async function create(ownerId: string, d: any) {
     const customerId = await findOrCreateCustomer(
       c,
       ownerId,
+      farmId,
       d.customer_name.trim(),
       phone,
     );
@@ -161,18 +164,18 @@ export async function create(ownerId: string, d: any) {
     const seq = Number(seqRow.rows[0].n);
     const no = `INV-${year}-${String(seq).padStart(4, '0')}`;
     const ins = await c.query(
-      `INSERT INTO invoices (owner_id,customer_id,invoice_year,invoice_seq,invoice_no,invoice_type,customer_name,customer_mobile,invoice_date,
+      `INSERT INTO invoices (owner_id,farm_id,customer_id,invoice_year,invoice_seq,invoice_no,invoice_type,customer_name,customer_mobile,invoice_date,
          subtotal,tax_percent,tax_amount,grand_total,notes,payment_status,paid_at,paid_amount)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::numeric,$14,$15,
-           CASE WHEN $15='paid' THEN NOW() ELSE NULL END,
-           CASE WHEN $15='paid' THEN $13::numeric ELSE 0::numeric END) RETURNING id`,
-      [ownerId, customerId, year, seq, no, d.invoice_type, d.customer_name, phone || null, d.invoice_date, subtotal, d.tax_percent, taxAmount, grand, d.notes, d.payment_status]
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::numeric,$15,$16,
+           CASE WHEN $16='paid' THEN NOW() ELSE NULL END,
+           CASE WHEN $16='paid' THEN $14::numeric ELSE 0::numeric END) RETURNING id`,
+      [ownerId, farmId, customerId, year, seq, no, d.invoice_type, d.customer_name, phone || null, d.invoice_date, subtotal, d.tax_percent, taxAmount, grand, d.notes, d.payment_status]
     );
     const invId = ins.rows[0].id;
     for (const it of items) {
       await c.query(
-        'INSERT INTO invoice_items (owner_id,invoice_id,description,quantity,unit_price,amount,egg_quantity,egg_unit,sale_unit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-        [ownerId, invId, it.description, it.quantity, it.unit_price, it.amount,
+        'INSERT INTO invoice_items (owner_id,farm_id,invoice_id,description,quantity,unit_price,amount,egg_quantity,egg_unit,sale_unit) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+        [ownerId, farmId, invId, it.description, it.quantity, it.unit_price, it.amount,
           eggQuantityForItem(it, d.invoice_type), d.invoice_type === 'egg_sale' ? it.egg_unit : null,
           d.invoice_type === 'poultry_manure_sale' ? it.sale_unit : null]
       );
@@ -180,9 +183,9 @@ export async function create(ownerId: string, d: any) {
     if (d.payment_status === 'paid' && grand > 0) {
       await c.query(
         `INSERT INTO customer_payments
-         (owner_id,customer_id,invoice_id,amount_paid,payment_mode,note,payment_date)
-         VALUES($1,$2,$3,$4,'Cash','Invoice paid at creation',$5)`,
-        [ownerId, customerId, invId, grand, d.invoice_date],
+         (owner_id,farm_id,customer_id,invoice_id,amount_paid,payment_mode,note,payment_date)
+         VALUES($1,$2,$3,$4,$5,'Cash','Invoice paid at creation',$6)`,
+        [ownerId, farmId, customerId, invId, grand, d.invoice_date],
       );
     }
     return invId;
@@ -197,6 +200,7 @@ export async function updatePaymentStatus(
 ) {
   return withTx(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+    const farmId = await resolveFarmId(client, ownerId);
     const invoices = await client.query(
       'SELECT id,customer_id,grand_total,paid_amount FROM invoices WHERE id=$1 AND owner_id=$2 FOR UPDATE',
       [id, ownerId],
@@ -209,9 +213,9 @@ export async function updatePaymentStatus(
       if (due > 0 && invoice.customer_id) {
         await client.query(
           `INSERT INTO customer_payments
-           (owner_id,customer_id,invoice_id,amount_paid,payment_mode,note,payment_date)
-           VALUES($1,$2,$3,$4,'Cash','Marked Paid from Bills',CURRENT_DATE)`,
-          [ownerId, invoice.customer_id, id, due],
+           (owner_id,farm_id,customer_id,invoice_id,amount_paid,payment_mode,note,payment_date)
+           VALUES($1,$2,$3,$4,$5,'Cash','Marked Paid from Bills',CURRENT_DATE)`,
+          [ownerId, farmId, invoice.customer_id, id, due],
         );
       }
       const updated = await client.query(
