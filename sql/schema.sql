@@ -925,6 +925,19 @@ CREATE INDEX IF NOT EXISTS idx_farms_owner ON farms(owner_user_id, created_at, i
 DO $$
 DECLARE t TEXT;
 BEGIN
+  ALTER TABLE feed_products
+    ADD COLUMN IF NOT EXISTS farm_id UUID REFERENCES farms(id) ON DELETE CASCADE;
+  LOCK TABLE feed_products IN SHARE ROW EXCLUSIVE MODE;
+  IF EXISTS (
+    SELECT 1
+    FROM feed_products product
+    JOIN farms farm
+      ON farm.owner_user_id=product.owner_id AND farm.is_primary
+    WHERE product.farm_id IS NULL
+  ) THEN
+    DROP INDEX IF EXISTS public.idx_feed_products_farm_name_ci;
+  END IF;
+
   FOREACH t IN ARRAY ARRAY[
     'flock_batches','mortality_logs','feed_products','feed_purchases','feed_usage',
     'feed_preparations','feed_preparation_items','egg_production','invoices',

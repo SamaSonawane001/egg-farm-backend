@@ -247,6 +247,19 @@ DECLARE
     'medicine_usage','medicine_usage_allocations','medicine_logs'
   ];
 BEGIN
+  ALTER TABLE feed_products
+    ADD COLUMN IF NOT EXISTS farm_id UUID REFERENCES farms(id) ON DELETE CASCADE;
+  LOCK TABLE feed_products IN SHARE ROW EXCLUSIVE MODE;
+  IF EXISTS (
+    SELECT 1
+    FROM feed_products product
+    JOIN farms farm
+      ON farm.owner_user_id=product.owner_id AND farm.is_primary
+    WHERE product.farm_id IS NULL
+  ) THEN
+    DROP INDEX IF EXISTS public.idx_feed_products_farm_name_ci;
+  END IF;
+
   FOREACH t IN ARRAY farm_tables LOOP
     SELECT relrowsecurity,relforcerowsecurity
     INTO rls_enabled,rls_forced
