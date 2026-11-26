@@ -72,18 +72,14 @@ CREATE TABLE IF NOT EXISTS feed_products (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_owner_name_ci ON feed_products(owner_id, lower(trim(name)));
 
-CREATE OR REPLACE FUNCTION create_owner_ready_feed() RETURNS TRIGGER AS $$
-BEGIN
-  INSERT INTO feed_products(owner_id, name) VALUES (NEW.id, 'Ready Feed')
-  ON CONFLICT DO NOTHING;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS users_create_ready_feed ON users;
-CREATE TRIGGER users_create_ready_feed
-AFTER INSERT ON users
-FOR EACH ROW EXECUTE FUNCTION create_owner_ready_feed();
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='feed_products' AND column_name='farm_id'
+  ) THEN
+    ALTER TABLE feed_products ALTER COLUMN farm_id DROP NOT NULL;
+  END IF;
+END $$;
 
 INSERT INTO feed_products(owner_id, name)
 SELECT id, 'Ready Feed' FROM users
@@ -946,6 +942,8 @@ BEGIN
   END LOOP;
 END $$;
 
+ALTER TABLE feed_products ALTER COLUMN farm_id DROP NOT NULL;
+
 -- Uniqueness is farm-local, not account-wide.
 ALTER TABLE feed_products DROP CONSTRAINT IF EXISTS feed_products_owner_id_name_key;
 DROP INDEX IF EXISTS idx_feed_products_owner_name_ci;
@@ -1045,6 +1043,7 @@ END $$;
 -- The legacy user trigger seeded account-wide products before farms existed.
 -- New farms seed their own default product in the application transaction.
 DROP TRIGGER IF EXISTS users_create_ready_feed ON users;
+DROP FUNCTION IF EXISTS public.create_owner_ready_feed() CASCADE;
 DROP FUNCTION IF EXISTS public_invoice_scope(UUID);
 DROP POLICY IF EXISTS public_invoice_link ON invoices;
 CREATE POLICY public_invoice_link ON invoices FOR SELECT USING (
@@ -1797,6 +1796,9 @@ WHERE f.id=r.id AND f.is_primary IS DISTINCT FROM (r.position=1);
 INSERT INTO schema_migrations(version) VALUES (12) ON CONFLICT DO NOTHING;
 
 -- Source: ensure_schema.sql
+DROP TRIGGER IF EXISTS users_create_ready_feed ON users;
+DROP FUNCTION IF EXISTS public.create_owner_ready_feed() CASCADE;
+
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS farm_name VARCHAR(160),
   ADD COLUMN IF NOT EXISTS address TEXT,
@@ -2035,6 +2037,8 @@ BEGIN
                    'idx_' || t || '_farm_id',t);
   END LOOP;
 END $$;
+
+ALTER TABLE feed_products ALTER COLUMN farm_id DROP NOT NULL;
 
 DO $$
 BEGIN

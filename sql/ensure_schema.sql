@@ -1,5 +1,8 @@
 BEGIN;
 
+DROP TRIGGER IF EXISTS users_create_ready_feed ON users;
+DROP FUNCTION IF EXISTS public.create_owner_ready_feed() CASCADE;
+
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS farm_name VARCHAR(160),
   ADD COLUMN IF NOT EXISTS address TEXT,
@@ -238,6 +241,8 @@ BEGIN
                    'idx_' || t || '_farm_id',t);
   END LOOP;
 END $$;
+
+ALTER TABLE feed_products ALTER COLUMN farm_id DROP NOT NULL;
 
 DO $$
 BEGIN
