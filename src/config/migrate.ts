@@ -13,6 +13,7 @@ const SUBSCRIPTION_SCHEMA_VERSION = 9;
 const FARM_PROFILE_SCHEMA_VERSION = 10;
 const FARM_OWNERSHIP_SCHEMA_VERSION = 11;
 const FARM_OWNER_NORMALIZATION_SCHEMA_VERSION = 12;
+const SCHEMA_REPAIR_VERSION = 13;
 
 export async function runMigrations(): Promise<void> {
   const existingIdType = await pool.query<{ id_type: string }>(
@@ -54,6 +55,12 @@ export async function runMigrations(): Promise<void> {
       appliedVersion = applied.rows[0]?.version ?? 0;
     }
   }
+
+  const schemaRepairSql = fs.readFileSync(
+    path.join(__dirname, '../../sql/ensure_schema.sql'),
+    'utf8',
+  );
+  await pool.query(schemaRepairSql);
 
   if (appliedVersion < CUSTOMER_KHATA_SCHEMA_VERSION) {
     const customerMigration = fs.readFileSync(
@@ -125,6 +132,12 @@ export async function runMigrations(): Promise<void> {
     );
     await pool.query(farmOwnerNormalizationMigration);
   }
+
+  await pool.query(schemaRepairSql);
+  await pool.query(
+    'INSERT INTO schema_migrations(version) VALUES ($1) ON CONFLICT DO NOTHING',
+    [SCHEMA_REPAIR_VERSION],
+  );
   console.log('✔ Database schema is up to date');
 }
 
