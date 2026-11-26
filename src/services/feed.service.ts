@@ -9,7 +9,7 @@ export async function getStock(ownerId: string) {
   const farmContext = getFarmContext();
   const activeFarmId = farmContext?.farmId ?? null;
   const farmIds = farmContext?.farmIds ?? null;
-  if (activeFarmId != null) await ensureReadyFeed(ownerId);
+  if (activeFarmId != null) await seedReadyFeedForEmptyFarm(ownerId);
   const [totals, feeds, settings] = await Promise.all([
     query(
       `SELECT COALESCE((SELECT SUM(bags) FROM feed_purchases
@@ -87,15 +87,17 @@ export const listPurchases = async (ownerId: string, limit = 20, offset = 0) => 
 };
 
 export const listProducts = async (ownerId: string) => {
-  if (getFarmContext()?.farmId != null) await ensureReadyFeed(ownerId);
+  const activeFarmId = getFarmContext()?.farmId ?? null;
+  if (activeFarmId != null) await seedReadyFeedForEmptyFarm(ownerId);
+  const productScope = activeFarmId == null ? 'fp.owner_id=$1' : 'fp.farm_id=$1';
   const rows = await query(
     `SELECT fp.id, fp.name,
             COALESCE((SELECT SUM(p.bags) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS purchased_bags,
             COALESCE((SELECT SUM(u.bags_equivalent) FROM feed_usage u WHERE u.owner_id=fp.owner_id AND u.feed_product_id=fp.id),0) AS consumed_bags,
             COALESCE((SELECT SUM(p.total_cost) FROM feed_purchases p WHERE p.owner_id=fp.owner_id AND p.feed_product_id=fp.id),0) AS total_spent
-     FROM feed_products fp WHERE fp.owner_id=$1
+     FROM feed_products fp WHERE ${productScope}
      ORDER BY CASE WHEN lower(trim(fp.name))='ready feed' THEN 0 ELSE 1 END, lower(fp.name), fp.id`,
-    [ownerId]
+    [activeFarmId ?? ownerId]
   );
   return rows.map((row) => ({ ...row, remaining_bags: row.purchased_bags - row.consumed_bags }));
 };
@@ -233,16 +235,35 @@ export async function deleteProduct(ownerId: string, id: string) {
 
 const lockOwner = (client: PoolClient, ownerId: string) => client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
 
-async function ensureReadyFeedInTx(client: PoolClient, ownerId: string) {
-  const farmId = await resolveFarmId(client, ownerId);
-  const result = await client.query(
+async function seedReadyFeedForEmptyFarmInTx(
+  client: PoolClient,
+  ownerId: string,
+  farmId: string,
+) {
+  const products = await client.query<{ count: number }>(
+    'SELECT COUNT(*)::int AS count FROM feed_products WHERE farm_id=$1',
+    [farmId],
+  );
+  if (products.rows[0].count !== 0) return;
+  await client.query(
     `INSERT INTO feed_products(owner_id,farm_id,name)
      VALUES($1,$2,'Ready Feed')
-     ON CONFLICT DO NOTHING
-     RETURNING id,name`,
+     ON CONFLICT DO NOTHING`,
     [ownerId, farmId],
   );
-  if (result.rows.length) return result.rows[0];
+}
+
+async function seedReadyFeedForEmptyFarm(ownerId: string) {
+  await withTx(async (client) => {
+    await lockOwner(client, ownerId);
+    const farmId = await resolveFarmId(client, ownerId);
+    await seedReadyFeedForEmptyFarmInTx(client, ownerId, farmId);
+  });
+}
+
+async function ensureReadyFeedInTx(client: PoolClient, ownerId: string) {
+  const farmId = await resolveFarmId(client, ownerId);
+  await seedReadyFeedForEmptyFarmInTx(client, ownerId, farmId);
   const existing = await client.query(
     `SELECT id,name FROM feed_products
      WHERE owner_id=$1 AND farm_id=$2 AND lower(trim(name))='ready feed'
