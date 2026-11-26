@@ -411,6 +411,7 @@ BEGIN
 
   BEGIN
     DROP INDEX IF EXISTS public.idx_feed_products_owner_name_ci;
+    LOCK TABLE feed_products IN SHARE ROW EXCLUSIVE MODE;
     DROP TABLE IF EXISTS pg_temp.feed_product_duplicate_map;
     CREATE TEMP TABLE feed_product_duplicate_map AS
     SELECT product.id AS duplicate_id, canonical.id AS canonical_id
@@ -454,8 +455,12 @@ BEGIN
       AND a.farm_id IS NOT DISTINCT FROM b.farm_id
       AND lower(trim(a.name))=lower(trim(b.name));
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_farm_name_ci
-      ON feed_products(farm_id,lower(trim(name)));
+    BEGIN
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_farm_name_ci
+        ON feed_products(farm_id,lower(trim(name)));
+    EXCEPTION WHEN unique_violation THEN
+      RAISE WARNING 'Could not create idx_feed_products_farm_name_ci: %', SQLERRM;
+    END;
     DROP TABLE pg_temp.feed_product_duplicate_map;
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING '%', SQLERRM;
