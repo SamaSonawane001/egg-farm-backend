@@ -306,13 +306,16 @@ export async function login(mobile: string, password: string) {
 }
 
 export async function getUser(ownerId: string, farmId?: string): Promise<User> {
+  const selectedFarmId =
+    farmId?.toLowerCase() === 'all' ? null : farmId ?? null;
   const rows = await query<User>(
     `SELECT ${USER_COLS}
      FROM users u
      JOIN farms f ON f.owner_user_id=u.id
-     WHERE u.id=$1 AND (($2::uuid IS NULL AND f.is_primary) OR f.id=$2::uuid)
+     WHERE u.id=$1::uuid AND f.owner_user_id=$1::uuid
+       AND (($2::uuid IS NULL AND f.is_primary) OR f.id=$2::uuid)
      ORDER BY f.is_primary DESC LIMIT 1`,
-    [ownerId, farmId ?? null],
+    [ownerId, selectedFarmId],
   );
   if (!rows.length) throw new HttpError(404, 'Account or farm not found');
   return rows[0];

@@ -238,7 +238,7 @@ export async function assertCanCreateInvoice(
 ) {
   const rows = await client.query(
     `SELECT subscription_status,subscription_expires_at,free_invoices_limit
-     FROM users WHERE id=$1 FOR UPDATE`,
+     FROM users WHERE id=$1::uuid FOR UPDATE`,
     [userId],
   );
   if (!rows.rows.length) throw new HttpError(404, 'Account not found');
@@ -290,7 +290,7 @@ export async function status(userId: string) {
        WHERE user_id=u.id AND status='PENDING'
        ORDER BY created_at DESC LIMIT 1
      ) p ON TRUE
-     WHERE u.id=$1`,
+     WHERE u.id=$1::uuid`,
     [userId],
   );
   if (!rows.length) throw new HttpError(404, 'Account not found');
@@ -343,7 +343,7 @@ export async function createOrder(userId: string, termsAccepted: boolean) {
     await lockOwner(client, userId);
     const users = await client.query(
       `SELECT id,owner_name,mobile,subscription_status,subscription_expires_at
-       FROM users WHERE id=$1 FOR UPDATE`,
+       FROM users WHERE id=$1::uuid FOR UPDATE`,
       [userId],
     );
     if (!users.rows.length) throw new HttpError(404, 'Account not found');
@@ -549,7 +549,7 @@ export async function cancel(userId: string) {
     await lockOwner(client, userId);
     const rows = await client.query(
       `SELECT subscription_status,subscription_expires_at,subscription_payment_id
-       FROM users WHERE id=$1 FOR UPDATE`,
+       FROM users WHERE id=$1::uuid FOR UPDATE`,
       [userId],
     );
     if (!rows.rows.length) throw new HttpError(404, 'Account not found');

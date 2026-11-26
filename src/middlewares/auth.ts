@@ -46,7 +46,7 @@ export async function farmContext(req: Request, res: Response, next: NextFunctio
   try {
     const requested = req.header('X-Farm-Id')?.trim();
     const farms = await pool.query<{ id: string }>(
-      'SELECT id FROM farms WHERE owner_user_id=$1 ORDER BY is_primary DESC, created_at, id',
+      'SELECT id FROM farms WHERE owner_user_id=$1::uuid ORDER BY is_primary DESC, created_at, id',
       [req.ownerId],
     );
     if (!farms.rows.length) throw new HttpError(404, 'No farms are associated with this account');
@@ -59,11 +59,15 @@ export async function farmContext(req: Request, res: Response, next: NextFunctio
     } else {
       const selected = (requested ?? farms.rows[0].id).toLowerCase();
       if (!UUID.test(selected)) throw new HttpError(400, 'Invalid farm id');
-      if (!farms.rows.some((farm) => farm.id === selected)) {
+      const ownedFarm = await pool.query<{ id: string }>(
+        'SELECT id FROM farms WHERE id=$1::uuid AND owner_user_id=$2::uuid',
+        [selected, req.ownerId],
+      );
+      if (!ownedFarm.rows.length) {
         throw new HttpError(404, 'Farm not found for this account');
       }
-      farmId = selected;
-      farmIds = [selected];
+      farmId = ownedFarm.rows[0].id;
+      farmIds = [farmId];
     }
 
     req.farmId = farmId;

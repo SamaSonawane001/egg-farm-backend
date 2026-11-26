@@ -13,16 +13,25 @@ async function inventoryContext(client: PoolClient, ownerId: string) {
   if (!activeFarmId) {
     throw new HttpError(409, 'Select an individual farm to manage inventory');
   }
-  const result = await client.query(
+  const result = await client.query<{
+    shared_inventory_enabled: boolean;
+    primary_farm_id: string;
+  }>(
     `SELECT u.shared_inventory_enabled,p.id AS primary_farm_id
-     FROM users u JOIN farms p ON p.owner_user_id=u.id AND p.is_primary
-     WHERE u.id=$1`,
-    [ownerId],
+     FROM users u
+     JOIN farms active_farm
+       ON active_farm.id=$2::uuid AND active_farm.owner_user_id=u.id
+     LEFT JOIN LATERAL (
+       SELECT f.id FROM farms f WHERE f.owner_user_id=u.id
+       ORDER BY f.is_primary DESC,f.created_at,f.id LIMIT 1
+     ) p ON TRUE
+     WHERE u.id=$1::uuid`,
+    [ownerId, activeFarmId],
   );
   if (!result.rows.length) throw new HttpError(404, 'Farm profile not found');
   return {
     enabled: result.rows[0].shared_inventory_enabled === true,
-    primaryFarmId: result.rows[0].primary_farm_id as string,
+    primaryFarmId: result.rows[0].primary_farm_id,
     activeFarmId,
   };
 }
