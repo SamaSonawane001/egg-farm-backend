@@ -314,7 +314,7 @@ export async function getUser(ownerId: string, farmId?: string): Promise<User> {
      ORDER BY f.is_primary DESC LIMIT 1`,
     [ownerId, farmId ?? null],
   );
-  if (!rows.length) throw new HttpError(401, 'Account or farm not found');
+  if (!rows.length) throw new HttpError(404, 'Account or farm not found');
   return rows[0];
 }
 

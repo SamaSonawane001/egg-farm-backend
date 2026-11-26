@@ -23,7 +23,11 @@ declare global {
 /** Validates the JWT and exposes the tenant id as req.ownerId. Every query is filtered by it. */
 export function auth(req: Request, _res: Response, next: NextFunction) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) throw new HttpError(401, 'Missing authentication token');
+  if (!header || !header.startsWith('Bearer ')) {
+    throw new HttpError(401, 'Missing authentication token', {
+      code: 'AUTH_REQUIRED',
+    });
+  }
   try {
     const payload = jwt.verify(header.slice(7), env.jwtSecret) as { ownerId: string };
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.ownerId)) {
@@ -31,7 +35,9 @@ export function auth(req: Request, _res: Response, next: NextFunction) {
     }
     req.ownerId = payload.ownerId;
   } catch {
-    throw new HttpError(401, 'Invalid or expired token');
+    throw new HttpError(401, 'Invalid or expired token', {
+      code: 'AUTH_INVALID',
+    });
   }
   next();
 }
