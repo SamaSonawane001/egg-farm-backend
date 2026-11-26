@@ -63,7 +63,15 @@ CREATE TABLE IF NOT EXISTS feed_products (
   UNIQUE (owner_id, name)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_owner_name_ci ON feed_products(owner_id, lower(trim(name)));
+DO $$
+BEGIN
+  BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_owner_name_ci
+      ON feed_products(owner_id, lower(trim(name)));
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING '%', SQLERRM;
+  END;
+END $$;
 
 DO $$ BEGIN
   IF EXISTS (
@@ -940,25 +948,94 @@ ALTER TABLE feed_products ALTER COLUMN farm_id DROP NOT NULL;
 -- Uniqueness is farm-local, not account-wide.
 ALTER TABLE feed_products DROP CONSTRAINT IF EXISTS feed_products_owner_id_name_key;
 DROP INDEX IF EXISTS idx_feed_products_owner_name_ci;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_farm_name_ci
-  ON feed_products(farm_id, lower(trim(name)));
+DO $$
+DECLARE
+  child_table TEXT;
+BEGIN
+  BEGIN
+    DROP TABLE IF EXISTS pg_temp.feed_product_duplicate_map;
+    CREATE TEMP TABLE feed_product_duplicate_map AS
+    SELECT product.id AS duplicate_id, canonical.id AS canonical_id
+    FROM feed_products product
+    JOIN LATERAL (
+      SELECT candidate.id
+      FROM feed_products candidate
+      WHERE candidate.farm_id IS NOT NULL
+        AND candidate.farm_id IS NOT DISTINCT FROM product.farm_id
+        AND lower(trim(candidate.name))=lower(trim(product.name))
+      ORDER BY candidate.ctid DESC
+      LIMIT 1
+    ) canonical ON TRUE
+    WHERE product.farm_id IS NOT NULL
+      AND product.id<>canonical.id;
+
+    FOREACH child_table IN ARRAY ARRAY[
+      'feed_purchases','feed_usage','feed_preparations',
+      'feed_preparation_items','raw_material_processing'
+    ] LOOP
+      IF to_regclass(format('public.%I',child_table)) IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema='public' AND table_name=child_table
+            AND column_name='feed_product_id'
+        ) THEN
+        EXECUTE format(
+          'UPDATE public.%I child
+           SET feed_product_id=duplicates.canonical_id
+           FROM pg_temp.feed_product_duplicate_map duplicates
+           WHERE child.feed_product_id=duplicates.duplicate_id',
+          child_table
+        );
+      END IF;
+    END LOOP;
+
+    DELETE FROM feed_products a
+    USING feed_products b
+    WHERE a.ctid < b.ctid
+      AND a.farm_id IS NOT NULL
+      AND a.farm_id IS NOT DISTINCT FROM b.farm_id
+      AND lower(trim(a.name))=lower(trim(b.name));
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_farm_name_ci
+      ON feed_products(farm_id, lower(trim(name)));
+    DROP TABLE pg_temp.feed_product_duplicate_map;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING '%', SQLERRM;
+  END;
+END $$;
 
 DROP INDEX IF EXISTS idx_raw_materials_owner_name_ci;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_farm_name_ci
-  ON raw_materials(farm_id, lower(trim(name)));
-
 DROP INDEX IF EXISTS idx_medicines_owner_name_ci;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_farm_name_ci
-  ON medicines(farm_id, lower(trim(name)));
-
 ALTER TABLE invoices DROP CONSTRAINT IF EXISTS invoices_owner_id_invoice_year_invoice_seq_key;
 DROP INDEX IF EXISTS idx_invoices_owner_year_seq;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_farm_year_seq
-  ON invoices(farm_id, invoice_year, invoice_seq);
-
 ALTER TABLE customers DROP CONSTRAINT IF EXISTS customers_owner_id_phone_key;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_farm_phone
-  ON customers(owner_id, farm_id, phone);
+DO $$
+BEGIN
+  BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_farm_name_ci
+      ON raw_materials(farm_id, lower(trim(name)));
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING '%', SQLERRM;
+  END;
+  BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_farm_name_ci
+      ON medicines(farm_id, lower(trim(name)));
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING '%', SQLERRM;
+  END;
+  BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_farm_year_seq
+      ON invoices(farm_id, invoice_year, invoice_seq);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING '%', SQLERRM;
+  END;
+  BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_farm_phone
+      ON customers(owner_id, farm_id, phone);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING '%', SQLERRM;
+  END;
+END $$;
 
 CREATE OR REPLACE FUNCTION set_business_row_farm() RETURNS TRIGGER AS $$
 DECLARE

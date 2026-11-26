@@ -119,7 +119,9 @@ export async function create(ownerId: string, d: { collection_date: string; batc
     const settings = await client.query(
       `SELECT f.eggs_per_tray FROM farms f
        WHERE f.id=NULLIF(current_setting('app.farm_id',true),'')::uuid
-         AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)`,
+         AND (f.owner_user_id=$1::uuid
+           OR to_jsonb(f)->>'user_id'=$1::text
+           OR to_jsonb(f)->>'owner_id'=$1::text)`,
       [ownerId],
     );
     if (!settings.rows.length) throw new HttpError(404, 'Farm profile not found');

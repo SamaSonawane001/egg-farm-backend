@@ -33,6 +33,7 @@ r.get('/health', health);
 r.use(auth, farmContext);
 r.use('/subscription', subscriptionRoutes);
 r.get('/auth/me', A.me);
+r.get('/profile', A.me);
 r.get('/farms', Farm.list);
 r.post('/farms', Farm.create);
 r.put('/farms/:farmId([0-9a-fA-F-]{36})', Farm.renameUnit);

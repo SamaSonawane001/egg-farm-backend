@@ -19,7 +19,9 @@ export async function listFarms(ownerId: string) {
             payment_qr_url,address,low_stock_threshold,kg_per_bag,
             default_tax_percent,eggs_per_tray
      FROM farms f
-     WHERE f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+     WHERE f.owner_user_id=$1::uuid
+        OR to_jsonb(f)->>'user_id'=$1::text
+        OR to_jsonb(f)->>'owner_id'=$1::text
      ORDER BY f.is_primary DESC,f.created_at,f.id`,
     [ownerId],
   );
@@ -35,7 +37,9 @@ export async function createFarm(
       `SELECT avatar_url,signature_url,payment_qr_url,address,low_stock_threshold,
               kg_per_bag,default_tax_percent,eggs_per_tray
        FROM farms f
-       WHERE f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+       WHERE f.owner_user_id=$1::uuid
+          OR to_jsonb(f)->>'user_id'=$1::text
+          OR to_jsonb(f)->>'owner_id'=$1::text
        ORDER BY f.is_primary DESC,f.created_at,f.id LIMIT 1`,
       [ownerId],
     );
@@ -77,7 +81,9 @@ export async function renameUnit(ownerId: string, farmId: string, name: string) 
   const rows = await query(
     `UPDATE farms f SET name=$3
      WHERE f.id=$2::uuid
-       AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+       AND (f.owner_user_id=$1::uuid
+         OR to_jsonb(f)->>'user_id'=$1::text
+         OR to_jsonb(f)->>'owner_id'=$1::text)
        AND f.is_primary=FALSE
      RETURNING id AS farm_id,name AS farm_name,is_primary`,
     [ownerId, farmId, name],
@@ -86,7 +92,9 @@ export async function renameUnit(ownerId: string, farmId: string, name: string) 
     const farms = await query(
       `SELECT is_primary FROM farms f
        WHERE f.id=$2::uuid
-         AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)`,
+         AND (f.owner_user_id=$1::uuid
+           OR to_jsonb(f)->>'user_id'=$1::text
+           OR to_jsonb(f)->>'owner_id'=$1::text)`,
       [ownerId, farmId],
     );
     if (farms[0]?.is_primary) {

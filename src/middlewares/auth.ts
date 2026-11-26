@@ -47,7 +47,9 @@ export async function farmContext(req: Request, res: Response, next: NextFunctio
     const requested = req.header('X-Farm-Id')?.trim();
     const farms = await pool.query<{ id: string }>(
       `SELECT f.id FROM farms f
-       WHERE f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+       WHERE f.owner_user_id=$1::uuid
+          OR to_jsonb(f)->>'user_id'=$1::text
+          OR to_jsonb(f)->>'owner_id'=$1::text
        ORDER BY f.is_primary DESC,f.created_at,f.id`,
       [req.ownerId],
     );
@@ -64,7 +66,9 @@ export async function farmContext(req: Request, res: Response, next: NextFunctio
       const ownedFarm = await pool.query<{ id: string }>(
         `SELECT f.id FROM farms f
          WHERE f.id=$1::uuid
-           AND (f.owner_user_id=$2::uuid OR to_jsonb(f)->>'user_id'=$2::text)`,
+           AND (f.owner_user_id=$2::uuid
+             OR to_jsonb(f)->>'user_id'=$2::text
+             OR to_jsonb(f)->>'owner_id'=$2::text)`,
         [selected, req.ownerId],
       );
       if (!ownedFarm.rows.length) {

@@ -20,10 +20,13 @@ async function inventoryContext(client: PoolClient, ownerId: string) {
      JOIN farms active_farm
       ON active_farm.id=$2::uuid
          AND (active_farm.owner_user_id=u.id
-           OR to_jsonb(active_farm)->>'user_id'=u.id::text)
+          OR to_jsonb(active_farm)->>'user_id'=u.id::text
+          OR to_jsonb(active_farm)->>'owner_id'=u.id::text)
      LEFT JOIN LATERAL (
       SELECT f.id FROM farms f
-      WHERE f.owner_user_id=u.id OR to_jsonb(f)->>'user_id'=u.id::text
+      WHERE f.owner_user_id=u.id
+         OR to_jsonb(f)->>'user_id'=u.id::text
+         OR to_jsonb(f)->>'owner_id'=u.id::text
        ORDER BY f.is_primary DESC,f.created_at,f.id LIMIT 1
      ) p ON TRUE
      WHERE u.id=$1::uuid`,
@@ -43,7 +46,9 @@ async function includeOwnerFarms(
 ): Promise<void> {
   const farms = await client.query<{ id: string }>(
     `SELECT f.id FROM farms f
-     WHERE f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+     WHERE f.owner_user_id=$1::uuid
+        OR to_jsonb(f)->>'user_id'=$1::text
+        OR to_jsonb(f)->>'owner_id'=$1::text
      ORDER BY f.created_at,f.id`,
     [ownerId],
   );
@@ -81,7 +86,8 @@ export async function listMaterials(ownerId: string) {
             COALESCE(
               (SELECT active_farm.kg_per_bag FROM farms active_farm
                WHERE (active_farm.owner_user_id=m.owner_id
-                 OR to_jsonb(active_farm)->>'user_id'=m.owner_id::text)
+                 OR to_jsonb(active_farm)->>'user_id'=m.owner_id::text
+                 OR to_jsonb(active_farm)->>'owner_id'=m.owner_id::text)
                  AND active_farm.id=COALESCE(
                    NULLIF(current_setting('app.farm_id',true),'')::uuid,
                    owner_farm.id
@@ -100,7 +106,8 @@ export async function listMaterials(ownerId: string) {
      JOIN farms owner_farm
        ON owner_farm.id=m.farm_id
           AND (owner_farm.owner_user_id=m.owner_id
-            OR to_jsonb(owner_farm)->>'user_id'=m.owner_id::text)
+            OR to_jsonb(owner_farm)->>'user_id'=m.owner_id::text
+            OR to_jsonb(owner_farm)->>'owner_id'=m.owner_id::text)
      LEFT JOIN raw_material_logs t ON t.material_id=m.id AND t.owner_id=m.owner_id
      WHERE m.owner_id=$1
        AND ($2::uuid IS NULL OR owner_farm.id=$2
@@ -138,7 +145,8 @@ export async function getMaterialDetails(ownerId: string, id: string, month: str
        JOIN farms owner_farm
          ON owner_farm.id=m.farm_id
             AND (owner_farm.owner_user_id=m.owner_id
-              OR to_jsonb(owner_farm)->>'user_id'=m.owner_id::text)
+              OR to_jsonb(owner_farm)->>'user_id'=m.owner_id::text
+              OR to_jsonb(owner_farm)->>'owner_id'=m.owner_id::text)
        LEFT JOIN raw_material_logs t ON t.material_id=m.id AND t.owner_id=m.owner_id
        WHERE m.owner_id=$1 AND m.id=$2
          AND ($4::uuid IS NULL OR owner_farm.id=$4
@@ -275,7 +283,9 @@ export async function receiveMaterial(ownerId: string, d: any) {
     const settings = await client.query(
       `SELECT f.kg_per_bag FROM farms f
        WHERE f.id=NULLIF(current_setting('app.farm_id',true),'')::uuid
-         AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)`,
+         AND (f.owner_user_id=$1::uuid
+           OR to_jsonb(f)->>'user_id'=$1::text
+           OR to_jsonb(f)->>'owner_id'=$1::text)`,
       [ownerId],
     );
     const kgPerBag = Number(d.kg_per_bag ?? settings.rows[0]?.kg_per_bag ?? 50) || 50;
@@ -362,10 +372,13 @@ export async function processMaterials(ownerId: string, d: any) {
          FROM raw_materials m
          JOIN farms f ON f.id=m.farm_id
            AND (f.owner_user_id=m.owner_id
-             OR to_jsonb(f)->>'user_id'=m.owner_id::text)
+             OR to_jsonb(f)->>'user_id'=m.owner_id::text
+             OR to_jsonb(f)->>'owner_id'=m.owner_id::text)
          WHERE m.owner_id=$1 AND m.id=$2
          AND (m.farm_id=$3 OR ($4::boolean AND (
-          f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+          f.owner_user_id=$1::uuid
+          OR to_jsonb(f)->>'user_id'=$1::text
+          OR to_jsonb(f)->>'owner_id'=$1::text
          )))
          FOR UPDATE OF m`,
         [ownerId, d.material_id, inventory.activeFarmId, inventory.enabled],
@@ -387,7 +400,9 @@ export async function processMaterials(ownerId: string, d: any) {
       const settings = await client.query(
         `SELECT f.kg_per_bag FROM farms f
          WHERE f.id=NULLIF(current_setting('app.farm_id',true),'')::uuid
-           AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)`,
+           AND (f.owner_user_id=$1::uuid
+             OR to_jsonb(f)->>'user_id'=$1::text
+             OR to_jsonb(f)->>'owner_id'=$1::text)`,
         [ownerId],
       );
       const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50) || 50;
@@ -570,7 +585,14 @@ export async function updateInward(ownerId: string, logId: string, d: any) {
     );
     if (!existing.rows.length) throw new HttpError(404, 'Raw material inward record not found');
     const old = existing.rows[0];
-    const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
+    const settings = await client.query(
+      `SELECT kg_per_bag FROM farms f
+       WHERE f.id=NULLIF(current_setting('app.farm_id',true),'')::uuid
+         AND (f.owner_user_id=$1
+           OR to_jsonb(f)->>'user_id'=$1::text
+           OR to_jsonb(f)->>'owner_id'=$1::text)`,
+      [ownerId],
+    );
     const unit = d.unit ?? old.entered_unit ?? old.unit;
     const kgPerBag = Number(
       d.kg_per_bag ??
@@ -630,7 +652,14 @@ export async function updateUsage(ownerId: string, logId: string, d: any) {
     if (old.preparation_id) {
       throw new HttpError(400, 'Ready Feed ingredient usage can only be changed by editing its preparation batch');
     }
-    const settings = await client.query(`SELECT kg_per_bag FROM farms WHERE owner_user_id=$1 AND id=NULLIF(current_setting('app.farm_id',true),'')::uuid`, [ownerId]);
+    const settings = await client.query(
+      `SELECT kg_per_bag FROM farms f
+       WHERE f.id=NULLIF(current_setting('app.farm_id',true),'')::uuid
+         AND (f.owner_user_id=$1
+           OR to_jsonb(f)->>'user_id'=$1::text
+           OR to_jsonb(f)->>'owner_id'=$1::text)`,
+      [ownerId],
+    );
     const kgPerBag = Number(settings.rows[0]?.kg_per_bag ?? 50) || 50;
     const unit = d.unit ?? old.entered_unit ?? 'kg';
     const quantity = d.quantity ?? Number(old.entered_quantity ?? old.quantity);

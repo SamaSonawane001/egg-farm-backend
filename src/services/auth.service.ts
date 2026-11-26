@@ -329,7 +329,9 @@ export async function getUser(ownerId: string, farmId?: string): Promise<User> {
               f.kg_per_bag,f.default_tax_percent,f.eggs_per_tray
        FROM farms f
        WHERE ($1::uuid IS NULL OR f.id=$1::uuid)
-         AND (f.owner_user_id=$2::uuid OR to_jsonb(f)->>'user_id'=$2::text)
+         AND (f.owner_user_id=$2::uuid
+           OR to_jsonb(f)->>'user_id'=$2::text
+           OR to_jsonb(f)->>'owner_id'=$2::text)
        ORDER BY f.is_primary DESC,f.created_at,f.id LIMIT 1`,
       [selectedFarmId, ownerId],
     ),
@@ -485,7 +487,9 @@ export async function updateProfile(
   const updatedFarmId = await withTx(async (client) => {
     const primary = await client.query<{ id: string }>(
     `SELECT f.id FROM farms f
-     WHERE (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+     WHERE (f.owner_user_id=$1::uuid
+       OR to_jsonb(f)->>'user_id'=$1::text
+       OR to_jsonb(f)->>'owner_id'=$1::text)
        AND f.is_primary=TRUE
      ORDER BY f.created_at,f.id LIMIT 1 FOR UPDATE`,
       [ownerId],
@@ -499,7 +503,9 @@ export async function updateProfile(
       if (i.shared_inventory_enabled && !current.rows[0]?.shared_inventory_enabled) {
         const farms = await client.query<{ id: string }>(
           `SELECT f.id FROM farms f
-           WHERE f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+           WHERE f.owner_user_id=$1::uuid
+              OR to_jsonb(f)->>'user_id'=$1::text
+              OR to_jsonb(f)->>'owner_id'=$1::text
            ORDER BY f.is_primary DESC,f.created_at,f.id`,
           [ownerId],
         );
@@ -522,7 +528,9 @@ export async function updateProfile(
       ) {
         const farms = await client.query<{ id: string }>(
           `SELECT f.id FROM farms f
-           WHERE f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text
+           WHERE f.owner_user_id=$1::uuid
+              OR to_jsonb(f)->>'user_id'=$1::text
+              OR to_jsonb(f)->>'owner_id'=$1::text
            ORDER BY f.is_primary DESC,f.created_at,f.id`,
           [ownerId],
         );
@@ -558,7 +566,9 @@ export async function updateProfile(
          name=COALESCE($3,name), address=COALESCE($4,address),
          avatar_url=COALESCE($5,avatar_url)
        WHERE f.id=$2::uuid
-         AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+         AND (f.owner_user_id=$1::uuid
+           OR to_jsonb(f)->>'user_id'=$1::text
+           OR to_jsonb(f)->>'owner_id'=$1::text)
        RETURNING f.id`,
       [ownerId, primary.rows[0].id, i.farm_name ?? null, i.address ?? null, i.avatar_url ?? null],
     );
@@ -573,7 +583,9 @@ export async function updateProfile(
          default_tax_percent=COALESCE($5,default_tax_percent),
          eggs_per_tray=COALESCE($6,eggs_per_tray)
        WHERE f.id=$2::uuid
-         AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+         AND (f.owner_user_id=$1::uuid
+           OR to_jsonb(f)->>'user_id'=$1::text
+           OR to_jsonb(f)->>'owner_id'=$1::text)
        RETURNING f.id`,
       [ownerId, settingsFarmId, i.low_stock_threshold ?? null,
         i.kg_per_bag ?? null, i.default_tax_percent ?? null, i.eggs_per_tray ?? null],
@@ -592,7 +604,9 @@ export async function updateFarmAsset(
   const column = asset === 'signature' ? 'signature_url' : 'payment_qr_url';
   const farm = await query<{ id: string }>(
     `SELECT f.id FROM farms f
-     WHERE (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+     WHERE (f.owner_user_id=$1::uuid
+       OR to_jsonb(f)->>'user_id'=$1::text
+       OR to_jsonb(f)->>'owner_id'=$1::text)
        AND f.is_primary=TRUE
      ORDER BY f.created_at,f.id LIMIT 1`,
     [ownerId],
@@ -601,7 +615,9 @@ export async function updateFarmAsset(
   const rows = await query(
     `UPDATE farms f SET ${column}=$2
      WHERE f.id=$3::uuid
-       AND (f.owner_user_id=$1::uuid OR to_jsonb(f)->>'user_id'=$1::text)
+       AND (f.owner_user_id=$1::uuid
+         OR to_jsonb(f)->>'user_id'=$1::text
+         OR to_jsonb(f)->>'owner_id'=$1::text)
      RETURNING f.id`,
     [ownerId, url, farm[0].id],
   );

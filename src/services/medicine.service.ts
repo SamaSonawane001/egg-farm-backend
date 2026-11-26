@@ -22,10 +22,13 @@ async function inventoryContext(client: PoolClient, ownerId: string) {
      JOIN farms active_farm
       ON active_farm.id=$2::uuid
          AND (active_farm.owner_user_id=u.id
-           OR to_jsonb(active_farm)->>'user_id'=u.id::text)
+          OR to_jsonb(active_farm)->>'user_id'=u.id::text
+          OR to_jsonb(active_farm)->>'owner_id'=u.id::text)
      LEFT JOIN LATERAL (
       SELECT f.id FROM farms f
-      WHERE f.owner_user_id=u.id OR to_jsonb(f)->>'user_id'=u.id::text
+      WHERE f.owner_user_id=u.id
+         OR to_jsonb(f)->>'user_id'=u.id::text
+         OR to_jsonb(f)->>'owner_id'=u.id::text
        ORDER BY f.is_primary DESC,f.created_at,f.id LIMIT 1
      ) p ON TRUE
      WHERE u.id=$1::uuid`,
@@ -79,7 +82,8 @@ export async function listMedicines(ownerId: string) {
      JOIN farms owner_farm
        ON owner_farm.id=m.farm_id
           AND (owner_farm.owner_user_id=m.owner_id
-            OR to_jsonb(owner_farm)->>'user_id'=m.owner_id::text)
+            OR to_jsonb(owner_farm)->>'user_id'=m.owner_id::text
+            OR to_jsonb(owner_farm)->>'owner_id'=m.owner_id::text)
      LEFT JOIN batch_stock s ON s.medicine_id=m.id AND s.owner_id=m.owner_id
      WHERE m.owner_id=$1
        AND ($2::uuid IS NULL OR owner_farm.id=$2
@@ -133,7 +137,8 @@ export async function getMedicineDetails(
        JOIN farms owner_farm
          ON owner_farm.id=m.farm_id
             AND (owner_farm.owner_user_id=m.owner_id
-              OR to_jsonb(owner_farm)->>'user_id'=m.owner_id::text)
+              OR to_jsonb(owner_farm)->>'user_id'=m.owner_id::text
+              OR to_jsonb(owner_farm)->>'owner_id'=m.owner_id::text)
        LEFT JOIN batch_stock s ON s.medicine_id=m.id AND s.owner_id=m.owner_id
        WHERE m.owner_id=$1 AND m.id=$2
          AND ($4::uuid IS NULL OR owner_farm.id=$4
@@ -433,7 +438,8 @@ export async function createUsage(ownerId: string, d: any) {
        FROM medicines m
        JOIN farms f ON f.id=m.farm_id
          AND (f.owner_user_id=m.owner_id
-           OR to_jsonb(f)->>'user_id'=m.owner_id::text)
+           OR to_jsonb(f)->>'user_id'=m.owner_id::text
+           OR to_jsonb(f)->>'owner_id'=m.owner_id::text)
        WHERE m.id=$1 AND m.owner_id=$2
          AND (m.farm_id=$3 OR (m.is_shared_pool=TRUE AND $4::boolean))
        FOR UPDATE OF m`,
