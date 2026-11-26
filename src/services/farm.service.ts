@@ -62,7 +62,7 @@ export async function createFarm(
     const id = created.rows[0].id;
     await setFarmSettings(client, { ownerId, farmId: id, farmIds: [id] });
     await client.query(
-      'INSERT INTO feed_products(owner_id,farm_id,name) VALUES($1,$2,$3)',
+      'INSERT INTO feed_products(owner_id,farm_id,name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',
       [ownerId, id, 'Ready Feed'],
     );
     return id;

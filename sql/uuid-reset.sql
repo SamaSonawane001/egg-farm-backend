@@ -1856,7 +1856,54 @@ ALTER TABLE farms
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 DO $$
+DECLARE
+  target_table TEXT;
+  table_rel REGCLASS;
+  item RECORD;
 BEGIN
+  FOREACH target_table IN ARRAY ARRAY['farms','farm_profiles'] LOOP
+    table_rel := to_regclass(format('public.%I',target_table));
+    IF table_rel IS NULL THEN
+      CONTINUE;
+    END IF;
+
+    FOR item IN
+      SELECT c.conname
+      FROM pg_constraint c
+      WHERE c.conrelid=table_rel
+        AND c.contype='u'
+        AND cardinality(c.conkey)=1
+        AND EXISTS (
+          SELECT 1 FROM pg_attribute a
+          WHERE a.attrelid=c.conrelid
+            AND a.attnum=c.conkey[1]
+            AND a.attname IN ('owner_id','owner_user_id','user_id')
+            AND NOT a.attisdropped
+        )
+    LOOP
+      EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT %I',target_table,item.conname);
+    END LOOP;
+
+    FOR item IN
+      SELECT index_class.relname AS index_name
+      FROM pg_index i
+      JOIN pg_class index_class ON index_class.oid=i.indexrelid
+      JOIN pg_attribute a
+        ON a.attrelid=i.indrelid AND a.attnum=i.indkey[0] AND NOT a.attisdropped
+      WHERE i.indrelid=table_rel
+        AND i.indisunique
+        AND NOT i.indisprimary
+        AND i.indnkeyatts=1
+        AND i.indexprs IS NULL
+        AND a.attname IN ('owner_id','owner_user_id','user_id')
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint c WHERE c.conindid=i.indexrelid
+        )
+    LOOP
+      EXECUTE format('DROP INDEX public.%I',item.index_name);
+    END LOOP;
+  END LOOP;
+
   IF EXISTS (
     SELECT 1 FROM information_schema.columns
     WHERE table_schema='public' AND table_name='farms' AND column_name='user_id'
@@ -1865,6 +1912,17 @@ BEGIN
       UPDATE farms f SET owner_user_id=u.id
       FROM users u
       WHERE f.owner_user_id IS NULL AND f.user_id::text=u.id::text
+    $sql$;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='farms' AND column_name='owner_id'
+  ) THEN
+    EXECUTE $sql$
+      UPDATE farms f SET owner_user_id=u.id
+      FROM users u
+      WHERE f.owner_user_id IS NULL AND f.owner_id::text=u.id::text
     $sql$;
   END IF;
 
@@ -2039,6 +2097,135 @@ BEGIN
 END $$;
 
 ALTER TABLE feed_products ALTER COLUMN farm_id DROP NOT NULL;
+
+DO $$
+DECLARE
+  item RECORD;
+BEGIN
+  IF EXISTS (SELECT 1 FROM schema_migrations WHERE version>=12) THEN
+  FOR item IN
+    SELECT c.conrelid::regclass AS table_name,c.conname
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid=c.conrelid
+    JOIN pg_namespace schema_namespace ON schema_namespace.oid=t.relnamespace
+    WHERE schema_namespace.nspname='public'
+      AND c.contype='u'
+      AND (
+        (t.relname IN ('feed_products','raw_materials','medicines')
+          AND cardinality(c.conkey)=2
+          AND ARRAY(
+            SELECT a.attname::text
+            FROM unnest(c.conkey) key(attnum)
+            JOIN pg_attribute a
+              ON a.attrelid=c.conrelid AND a.attnum=key.attnum
+            ORDER BY a.attname::text
+          )=ARRAY['name','owner_id']::text[])
+        OR (t.relname='invoices'
+          AND cardinality(c.conkey)=3
+          AND ARRAY(
+            SELECT a.attname::text
+            FROM unnest(c.conkey) key(attnum)
+            JOIN pg_attribute a
+              ON a.attrelid=c.conrelid AND a.attnum=key.attnum
+            ORDER BY a.attname::text
+          )=ARRAY['invoice_seq','invoice_year','owner_id']::text[])
+        OR (t.relname='customers'
+          AND cardinality(c.conkey)=2
+          AND ARRAY(
+            SELECT a.attname::text
+            FROM unnest(c.conkey) key(attnum)
+            JOIN pg_attribute a
+              ON a.attrelid=c.conrelid AND a.attnum=key.attnum
+            ORDER BY a.attname::text
+          )=ARRAY['owner_id','phone']::text[])
+      )
+  LOOP
+    EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I',item.table_name,item.conname);
+  END LOOP;
+
+  FOR item IN
+    SELECT index_class.relname AS index_name
+    FROM pg_index i
+    JOIN pg_class table_class ON table_class.oid=i.indrelid
+    JOIN pg_namespace schema_namespace ON schema_namespace.oid=table_class.relnamespace
+    JOIN pg_class index_class ON index_class.oid=i.indexrelid
+    WHERE schema_namespace.nspname='public'
+      AND i.indisunique
+      AND NOT i.indisprimary
+      AND i.indexprs IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_constraint c WHERE c.conindid=i.indexrelid
+      )
+      AND (
+        (table_class.relname IN ('feed_products','raw_materials','medicines')
+          AND i.indnkeyatts=2
+          AND ARRAY(
+            SELECT a.attname::text
+            FROM generate_series(0,i.indnkeyatts-1) AS key_position(n)
+            JOIN pg_attribute a
+              ON a.attrelid=i.indrelid AND a.attnum=i.indkey[key_position.n]
+            ORDER BY a.attname::text
+          )=ARRAY['name','owner_id']::text[])
+        OR (table_class.relname='invoices'
+          AND i.indnkeyatts=3
+          AND ARRAY(
+            SELECT a.attname::text
+            FROM generate_series(0,i.indnkeyatts-1) AS key_position(n)
+            JOIN pg_attribute a
+              ON a.attrelid=i.indrelid AND a.attnum=i.indkey[key_position.n]
+            ORDER BY a.attname::text
+          )=ARRAY['invoice_seq','invoice_year','owner_id']::text[])
+        OR (table_class.relname='customers'
+          AND i.indnkeyatts=2
+          AND ARRAY(
+            SELECT a.attname::text
+            FROM generate_series(0,i.indnkeyatts-1) AS key_position(n)
+            JOIN pg_attribute a
+              ON a.attrelid=i.indrelid AND a.attnum=i.indkey[key_position.n]
+            ORDER BY a.attname::text
+          )=ARRAY['owner_id','phone']::text[])
+      )
+  LOOP
+    EXECUTE format('DROP INDEX public.%I',item.index_name);
+  END LOOP;
+
+  DROP INDEX IF EXISTS public.idx_feed_products_owner_name_ci;
+  DROP INDEX IF EXISTS public.idx_raw_materials_owner_name_ci;
+  DROP INDEX IF EXISTS public.idx_medicines_owner_name_ci;
+  DROP INDEX IF EXISTS public.idx_invoices_owner_year_seq;
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_feed_products_farm_name_ci
+    ON feed_products(farm_id,lower(trim(name)));
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_local_farm_name_ci
+    ON raw_materials(farm_id,lower(trim(name))) WHERE is_shared_pool=FALSE;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_materials_shared_owner_name_ci
+    ON raw_materials(owner_id,lower(trim(name))) WHERE is_shared_pool=TRUE;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_local_farm_name_ci
+    ON medicines(farm_id,lower(trim(name))) WHERE is_shared_pool=FALSE;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_medicines_shared_owner_name_ci
+    ON medicines(owner_id,lower(trim(name))) WHERE is_shared_pool=TRUE;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_farm_year_seq
+    ON invoices(farm_id,invoice_year,invoice_seq);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_farm_phone
+    ON customers(owner_id,farm_id,phone);
+
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='customers'
+        AND column_name='normalized_phone'
+    ) THEN
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_farm_normalized_phone
+        ON customers(farm_id,normalized_phone) WHERE normalized_phone<>'';
+    END IF;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_farms_owner_name
+      ON farms(owner_user_id,lower(trim(name)));
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_farms_single_primary
+      ON farms(owner_user_id) WHERE is_primary;
+    CREATE INDEX IF NOT EXISTS idx_farms_owner
+      ON farms(owner_user_id,created_at,id);
+  END IF;
+END $$;
 
 DO $$
 BEGIN
