@@ -139,7 +139,7 @@ export async function getDashboard(ownerId: string, today: string, allFarms = fa
         sharedInventoryEnabled, primaryFarmId]
     ),
     getStock(ownerId),
-    availableStock(ownerId),
+    availableStock(ownerId, allFarms),
     listMaterials(ownerId),
   ]);
   const summary = overview[0];

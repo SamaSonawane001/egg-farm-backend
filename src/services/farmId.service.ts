@@ -11,31 +11,32 @@ export async function resolveFarmId(
   if (context && context.ownerId !== ownerId) {
     throw new HttpError(403, 'Farm context does not match this account');
   }
-  const activeFarmId =
-    context?.farmId && context.farmId !== 'all' ? context.farmId : null;
-  await ensurePrimaryFarm(ownerId, client);
-  const result = await client.query<{ id: string }>(
-    `SELECT f.id FROM farms f
-     WHERE (f.owner_user_id=$1::uuid
-        OR to_jsonb(f)->>'user_id'=$1::text
-        OR to_jsonb(f)->>'owner_id'=$1::text)
-       AND (($2::uuid IS NOT NULL AND f.id=$2::uuid)
-         OR ($2::uuid IS NULL AND f.is_primary=TRUE))
-     ORDER BY f.is_primary DESC,f.created_at,f.id
-     LIMIT 1`,
-    [ownerId, activeFarmId],
-  );
-  if (!result.rows.length) {
-    const primary = await client.query<{ id: string }>(
-      `SELECT f.id FROM farms f
-       WHERE f.owner_user_id=$1::uuid AND f.is_primary=TRUE
-       ORDER BY f.created_at,f.id LIMIT 1`,
-      [ownerId],
+  if (context) {
+    if (!context.farmId) {
+      throw new HttpError(409, 'Select an individual farm to make changes');
+    }
+    const selected = await client.query<{ id: string }>(
+      `SELECT id FROM farms
+       WHERE id=$1::uuid AND owner_user_id=$2::uuid`,
+      [context.farmId, ownerId],
     );
-    if (!primary.rows.length) {
+    if (!selected.rows.length) {
       throw new HttpError(404, 'Farm not found for this account');
     }
-    return primary.rows[0].id;
+    return selected.rows[0].id;
   }
-  return result.rows[0].id;
+
+  const primary = await ensurePrimaryFarm(ownerId, client);
+  return primary.id;
+}
+
+export function getActiveFarmId(ownerId: string): string {
+  const context = getFarmContext();
+  if (context && context.ownerId !== ownerId) {
+    throw new HttpError(403, 'Farm context does not match this account');
+  }
+  if (!context?.farmId) {
+    throw new HttpError(409, 'Select an individual farm to continue');
+  }
+  return context.farmId;
 }

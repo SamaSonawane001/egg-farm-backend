@@ -1,7 +1,7 @@
 import { PoolClient } from 'pg';
 import { query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
-import { resolveFarmId } from './farmId.service';
+import { getActiveFarmId, resolveFarmId } from './farmId.service';
 
 export function normalizeCustomerPhone(value: unknown): string {
   let digits = String(value ?? '').replace(/\D/g, '');
@@ -62,26 +62,28 @@ export async function listCustomers(
   limit: number,
   offset: number,
 ) {
+  const farmId = getActiveFarmId(ownerId);
   const cte = `WITH invoice_totals AS (
-      SELECT i.owner_id,i.customer_id,SUM(i.grand_total) AS total_billed,
+      SELECT i.owner_id,i.customer_id,i.farm_id,SUM(i.grand_total) AS total_billed,
              COALESCE((
                SELECT SUM(it.egg_quantity)
                FROM invoices ei
                JOIN invoice_items it ON it.owner_id=ei.owner_id AND it.invoice_id=ei.id
                WHERE ei.owner_id=i.owner_id AND ei.customer_id=i.customer_id
+                 AND ei.farm_id=i.farm_id AND it.farm_id=i.farm_id
                  AND ei.invoice_type='egg_sale'
                  AND ei.invoice_date >= CURRENT_DATE - INTERVAL '30 days'
              ),0) AS total_eggs
       FROM invoices i
-      WHERE i.owner_id=$1
+      WHERE i.owner_id=$1 AND i.farm_id=$3
         AND i.invoice_date >= CURRENT_DATE - INTERVAL '30 days'
-      GROUP BY i.owner_id,i.customer_id
+      GROUP BY i.owner_id,i.customer_id,i.farm_id
     ), payment_totals AS (
-      SELECT owner_id,customer_id,SUM(amount_paid) AS total_paid
+      SELECT owner_id,customer_id,farm_id,SUM(amount_paid) AS total_paid
       FROM customer_payments
-      WHERE owner_id=$1
+      WHERE owner_id=$1 AND farm_id=$3
         AND payment_date >= CURRENT_DATE - INTERVAL '30 days'
-      GROUP BY owner_id,customer_id
+      GROUP BY owner_id,customer_id,farm_id
     ), customer_activity AS (
       SELECT c.id,c.name,c.phone,c.normalized_phone,c.farm_id,c.created_at,
              COALESCE(i.total_billed,0) AS total_billed,
@@ -90,17 +92,19 @@ export async function listCustomers(
              COALESCE(i.total_eggs,0) AS total_eggs
       FROM customers c
       LEFT JOIN invoice_totals i ON i.owner_id=c.owner_id AND i.customer_id=c.id
+        AND i.farm_id=c.farm_id
       LEFT JOIN payment_totals p ON p.owner_id=c.owner_id AND p.customer_id=c.id
-      WHERE c.owner_id=$1
+        AND p.farm_id=c.farm_id
+      WHERE c.owner_id=$1 AND c.farm_id=$3
         AND ($2='' OR c.name ILIKE '%' || $2 || '%'
           OR c.phone ILIKE '%' || $2 || '%'
           OR c.normalized_phone ILIKE '%' || $2 || '%')
     )`;
-  const params = [ownerId, search.trim()];
+  const params = [ownerId, search.trim(), farmId];
   const [data, count] = await Promise.all([
     query(
       `${cte} SELECT * FROM customer_activity
-       ORDER BY lower(name),phone LIMIT $3 OFFSET $4`,
+       ORDER BY lower(name),phone LIMIT $4 OFFSET $5`,
       [...params, limit, offset],
     ),
     query(`${cte} SELECT COUNT(*)::int AS total FROM customer_activity`, params),
@@ -115,40 +119,46 @@ export async function customerLedger(
   limit: number,
   offset: number,
 ) {
+  const farmId = getActiveFarmId(ownerId);
   const [customers, summary, openInvoices, latestInvoice] = await Promise.all([
-    query('SELECT id,name,phone FROM customers WHERE id=$1 AND owner_id=$2', [customerId, ownerId]),
+    query(
+      'SELECT id,name,phone FROM customers WHERE id=$1 AND owner_id=$2 AND farm_id=$3',
+      [customerId, ownerId, farmId],
+    ),
     query(
       `SELECT COALESCE((SELECT SUM(grand_total) FROM invoices
-                        WHERE owner_id=$1 AND customer_id=$2),0) AS total_billed,
+                        WHERE owner_id=$1 AND customer_id=$2 AND farm_id=$3),0) AS total_billed,
               COALESCE((SELECT SUM(p.amount_paid) FROM customer_payments p
-                        WHERE p.owner_id=$1 AND p.customer_id=$2),0) AS total_paid,
+                        WHERE p.owner_id=$1 AND p.customer_id=$2 AND p.farm_id=$3),0) AS total_paid,
               COALESCE((SELECT SUM(it.egg_quantity)
                         FROM invoices i JOIN invoice_items it
                           ON it.invoice_id=i.id AND it.owner_id=i.owner_id
-                        WHERE i.owner_id=$1 AND i.customer_id=$2
+                            AND it.farm_id=i.farm_id
+                        WHERE i.owner_id=$1 AND i.customer_id=$2 AND i.farm_id=$3
                           AND i.invoice_type='egg_sale'),0) AS total_eggs,
               GREATEST(
                 COALESCE((SELECT SUM(grand_total) FROM invoices
-                          WHERE owner_id=$1 AND customer_id=$2),0) -
+                          WHERE owner_id=$1 AND customer_id=$2 AND farm_id=$3),0) -
                 COALESCE((SELECT SUM(amount_paid) FROM customer_payments
-                          WHERE owner_id=$1 AND customer_id=$2),0),
+                          WHERE owner_id=$1 AND customer_id=$2 AND farm_id=$3),0),
                 0
               ) AS pending_balance`,
-      [ownerId, customerId],
+      [ownerId, customerId, farmId],
     ),
     query(
       `SELECT id,invoice_no,invoice_date,grand_total,paid_amount,
               grand_total-paid_amount AS balance
        FROM invoices
-       WHERE owner_id=$1 AND customer_id=$2 AND paid_amount < grand_total
+       WHERE owner_id=$1 AND customer_id=$2 AND farm_id=$3
+         AND paid_amount < grand_total
        ORDER BY invoice_date,id`,
-      [ownerId, customerId],
+      [ownerId, customerId, farmId],
     ),
     query(
       `SELECT id,invoice_no FROM invoices
-       WHERE owner_id=$1 AND customer_id=$2
+      WHERE owner_id=$1 AND customer_id=$2 AND farm_id=$3
        ORDER BY created_at DESC,id DESC LIMIT 1`,
-      [ownerId, customerId],
+      [ownerId, customerId, farmId],
     ),
   ]);
   if (!customers.length) throw new HttpError(404, 'Customer not found');
@@ -157,7 +167,8 @@ export async function customerLedger(
               i.id AS invoice_id,i.invoice_no,i.invoice_type,i.grand_total AS billed_amount,
               i.paid_amount,i.created_at,
               COALESCE((SELECT SUM(it.egg_quantity) FROM invoice_items it
-                        WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id),0) AS egg_quantity,
+                        WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id
+                          AND it.farm_id=i.farm_id),0) AS egg_quantity,
               COALESCE((SELECT string_agg(
                           format('%s × %s%s @ %s',it.description,it.quantity,
                             CASE it.sale_unit
@@ -169,7 +180,8 @@ export async function customerLedger(
                             it.unit_price),
                           ', ' ORDER BY it.id)
                         FROM invoice_items it
-                        WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id),'Invoice') AS details,
+                        WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id
+                          AND it.farm_id=i.farm_id),'Invoice') AS details,
               NULL::text AS payment_mode,NULL::text AS note,
               COALESCE((
                 SELECT SUM(it.amount) / NULLIF(SUM(
@@ -180,32 +192,34 @@ export async function customerLedger(
                 ),0)
                 FROM invoice_items it
                 WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id
+                  AND it.farm_id=i.farm_id
               ),0) AS unit_rate,
               COALESCE((SELECT SUM(it.quantity) FROM invoice_items it
-                        WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id),0) AS item_quantity
+                        WHERE it.owner_id=i.owner_id AND it.invoice_id=i.id
+                          AND it.farm_id=i.farm_id),0) AS item_quantity
        FROM invoices i
-       WHERE i.owner_id=$1 AND i.customer_id=$2
+       WHERE i.owner_id=$1 AND i.customer_id=$2 AND i.farm_id=$3
        UNION ALL
        SELECT p.id::text,p.payment_date,'payment'::text,p.invoice_id,
               NULL::text,NULL::text,0::numeric,p.amount_paid,p.created_at,0::numeric,
               'Payment received'::text,p.payment_mode,p.note,NULL::numeric,0::numeric
        FROM customer_payments p
-       WHERE p.owner_id=$1 AND p.customer_id=$2
+       WHERE p.owner_id=$1 AND p.customer_id=$2 AND p.farm_id=$3
      )`;
   const [ledger, count] = await Promise.all([
     query(
       `${timeline}
        SELECT * FROM ledger
-       WHERE ($3::date IS NULL OR entry_date >= $3::date)
+       WHERE ($4::date IS NULL OR entry_date >= $4::date)
        ORDER BY created_at DESC,id DESC
-       LIMIT $4 OFFSET $5`,
-      [ownerId, customerId, sinceDate, limit, offset],
+       LIMIT $5 OFFSET $6`,
+      [ownerId, customerId, farmId, sinceDate, limit, offset],
     ),
     query(
       `${timeline}
        SELECT COUNT(*)::int AS total FROM ledger
-       WHERE ($3::date IS NULL OR entry_date >= $3::date)`,
-      [ownerId, customerId, sinceDate],
+       WHERE ($4::date IS NULL OR entry_date >= $4::date)`,
+      [ownerId, customerId, farmId, sinceDate],
     ),
   ]);
   return {
@@ -227,24 +241,25 @@ export async function receiveCustomerPayment(
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
     const farmId = await resolveFarmId(client, ownerId);
     const customer = await client.query(
-      'SELECT id FROM customers WHERE owner_id=$1 AND id=$2 FOR UPDATE',
-      [ownerId, customerId],
+      'SELECT id FROM customers WHERE owner_id=$1 AND id=$2 AND farm_id=$3 FOR UPDATE',
+      [ownerId, customerId, farmId],
     );
     if (!customer.rows.length) throw new HttpError(404, 'Customer not found');
 
     const invoices = await client.query(
       `SELECT id,grand_total,paid_amount FROM invoices
        WHERE owner_id=$1 AND customer_id=$2
-         AND ($3::uuid IS NULL OR id=$3)
+         AND ($3::uuid IS NULL OR id=$3) AND farm_id=$4
          AND paid_amount < grand_total
        ORDER BY invoice_date ASC,created_at ASC,id ASC
        FOR UPDATE`,
-      [ownerId, customerId, d.invoice_id ?? null],
+      [ownerId, customerId, d.invoice_id ?? null, farmId],
     );
     if (d.invoice_id && !invoices.rows.length) {
       const exists = await client.query(
-        'SELECT 1 FROM invoices WHERE owner_id=$1 AND customer_id=$2 AND id=$3',
-        [ownerId, customerId, d.invoice_id],
+        `SELECT 1 FROM invoices
+         WHERE owner_id=$1 AND customer_id=$2 AND id=$3 AND farm_id=$4`,
+        [ownerId, customerId, d.invoice_id, farmId],
       );
       if (!exists.rows.length) throw new HttpError(404, 'Invoice not found for this customer');
       throw new HttpError(400, 'This invoice has no pending balance');
@@ -273,8 +288,8 @@ export async function receiveCustomerPayment(
         `UPDATE invoices SET paid_amount=$3::numeric,
           payment_status=CASE WHEN $3::numeric >= grand_total THEN 'paid' ELSE 'unpaid' END,
           paid_at=CASE WHEN $3::numeric >= grand_total THEN COALESCE(paid_at,NOW()) ELSE NULL END
-         WHERE owner_id=$1 AND id=$2`,
-        [ownerId, invoice.id, newPaid],
+          WHERE owner_id=$1 AND id=$2 AND farm_id=$4`,
+        [ownerId, invoice.id, newPaid, farmId],
       );
       const result = await client.query(
         `INSERT INTO customer_payments
@@ -296,16 +311,18 @@ export async function removeCustomerPayment(
 ) {
   return withTx(async (client: PoolClient) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+    const farmId = await resolveFarmId(client, ownerId);
     const payment = await client.query(
       `SELECT id,invoice_id FROM customer_payments
-       WHERE owner_id=$1 AND customer_id=$2 AND id=$3 FOR UPDATE`,
-      [ownerId, customerId, paymentId],
+       WHERE owner_id=$1 AND customer_id=$2 AND id=$3 AND farm_id=$4 FOR UPDATE`,
+      [ownerId, customerId, paymentId, farmId],
     );
     if (!payment.rows.length) throw new HttpError(404, 'Customer payment not found');
 
     await client.query(
-      'DELETE FROM customer_payments WHERE owner_id=$1 AND customer_id=$2 AND id=$3',
-      [ownerId, customerId, paymentId],
+      `DELETE FROM customer_payments
+       WHERE owner_id=$1 AND customer_id=$2 AND id=$3 AND farm_id=$4`,
+      [ownerId, customerId, paymentId, farmId],
     );
 
     if (payment.rows[0].invoice_id) {
@@ -319,25 +336,27 @@ export async function removeCustomerPayment(
          FROM (
            SELECT COALESCE(SUM(amount_paid),0) AS total_paid
            FROM customer_payments
-           WHERE owner_id=$1 AND customer_id=$2 AND invoice_id=$3
+           WHERE owner_id=$1 AND customer_id=$2 AND invoice_id=$3 AND farm_id=$4
          ) p
-         WHERE i.owner_id=$1 AND i.customer_id=$2 AND i.id=$3`,
-        [ownerId, customerId, payment.rows[0].invoice_id],
+         WHERE i.owner_id=$1 AND i.customer_id=$2 AND i.id=$3 AND i.farm_id=$4`,
+        [ownerId, customerId, payment.rows[0].invoice_id, farmId],
       );
     }
 
     await client.query(
       `DELETE FROM customers c
-       WHERE c.owner_id=$1 AND c.id=$2
+       WHERE c.owner_id=$1 AND c.id=$2 AND c.farm_id=$3
          AND NOT EXISTS (
            SELECT 1 FROM invoices i
            WHERE i.owner_id=c.owner_id AND i.customer_id=c.id
+             AND i.farm_id=c.farm_id
          )
          AND NOT EXISTS (
            SELECT 1 FROM customer_payments p
            WHERE p.owner_id=c.owner_id AND p.customer_id=c.id
+             AND p.farm_id=c.farm_id
          )`,
-      [ownerId, customerId],
+      [ownerId, customerId, farmId],
     );
 
     return { deleted: true };

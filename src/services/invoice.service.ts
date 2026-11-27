@@ -8,51 +8,63 @@ import {
   normalizeCustomerPhone,
 } from './customer.service';
 import { assertCanCreateInvoice } from './subscription.service';
-import { resolveFarmId } from './farmId.service';
+import { getActiveFarmId, resolveFarmId } from './farmId.service';
 
 export const list = async (ownerId: string, limit = 10, offset = 0) => {
+  const farmId = getActiveFarmId(ownerId);
   const [data, count] = await Promise.all([
     query(
       `SELECT i.*,
             COALESCE(to_jsonb(i)->>'payment_status','unpaid') AS payment_status,
             to_jsonb(i)->>'paid_at' AS paid_at,
-            (SELECT COUNT(*) FROM invoice_items it WHERE it.invoice_id=i.id) AS items_count,
+            (SELECT COUNT(*) FROM invoice_items it
+             WHERE it.invoice_id=i.id AND it.owner_id=i.owner_id AND it.farm_id=i.farm_id) AS items_count,
             COALESCE((SELECT json_agg(json_build_object(
               'description',it.description,'quantity',it.quantity,'unit_price',it.unit_price,
               'amount',it.amount,'egg_quantity',it.egg_quantity,'egg_unit',it.egg_unit,
               'sale_unit',it.sale_unit
             ) ORDER BY it.id) FROM invoice_items it
-              WHERE it.invoice_id=i.id AND it.owner_id=i.owner_id),'[]'::json) AS items
-     FROM invoices i WHERE i.owner_id=$1 ORDER BY i.created_at DESC, i.id DESC
+              WHERE it.invoice_id=i.id AND it.owner_id=i.owner_id
+                AND it.farm_id=i.farm_id),'[]'::json) AS items
+     FROM invoices i
+     WHERE i.owner_id=$1 AND i.farm_id=$4
+     ORDER BY i.created_at DESC, i.id DESC
      LIMIT $2 OFFSET $3`,
-      [ownerId, limit, offset]
+      [ownerId, limit, offset, farmId]
     ),
-    query('SELECT COUNT(*)::int AS total FROM invoices WHERE owner_id=$1', [ownerId]),
+    query(
+      'SELECT COUNT(*)::int AS total FROM invoices WHERE owner_id=$1 AND farm_id=$2',
+      [ownerId, farmId],
+    ),
   ]);
   return { data, total: Number(count[0].total) };
 };
 
 export const paymentSummary = async (ownerId: string) => {
+  const farmId = getActiveFarmId(ownerId);
   const rows = await query(
     `WITH customer_balances AS (
        SELECT c.id,
          GREATEST(COALESCE(SUM(i.grand_total),0) -
            COALESCE((SELECT SUM(p.amount_paid) FROM customer_payments p
-                     WHERE p.owner_id=c.owner_id AND p.customer_id=c.id),0),0) AS balance
+                     WHERE p.owner_id=c.owner_id AND p.customer_id=c.id
+                       AND p.farm_id=$2),0),0) AS balance
        FROM customers c
        LEFT JOIN invoices i ON i.owner_id=c.owner_id AND i.customer_id=c.id
-       WHERE c.owner_id=$1
+         AND i.farm_id=$2
+       WHERE c.owner_id=$1 AND c.farm_id=$2
        GROUP BY c.id
      ),
      unlinked AS (
        SELECT GREATEST(i.grand_total-i.paid_amount,0) AS balance
-       FROM invoices i WHERE i.owner_id=$1 AND i.customer_id IS NULL
+       FROM invoices i
+       WHERE i.owner_id=$1 AND i.farm_id=$2 AND i.customer_id IS NULL
      )
      SELECT COALESCE((SELECT SUM(balance) FROM customer_balances),0)
               + COALESCE((SELECT SUM(balance) FROM unlinked),0) AS pending_amount,
-            (SELECT COUNT(*) FROM invoices i WHERE i.owner_id=$1
+            (SELECT COUNT(*) FROM invoices i WHERE i.owner_id=$1 AND i.farm_id=$2
               AND i.paid_amount < i.grand_total)::int AS pending_count`,
-    [ownerId],
+    [ownerId, farmId],
   );
   return {
     pending_amount: Number(rows[0].pending_amount),
@@ -61,9 +73,14 @@ export const paymentSummary = async (ownerId: string) => {
 };
 
 export const getEggStock = async (ownerId: string, client?: any) => {
-  const sql = `SELECT COALESCE((SELECT SUM(net_eggs) FROM egg_production WHERE owner_id=$1),0) AS produced,
-                      COALESCE((SELECT SUM(COALESCE(egg_quantity,0)) FROM invoice_items WHERE owner_id=$1),0) AS sold`;
-  const row = client ? (await client.query(sql, [ownerId])).rows[0] : (await query(sql, [ownerId]))[0];
+  const farmId = getActiveFarmId(ownerId);
+  const sql = `SELECT COALESCE((SELECT SUM(net_eggs) FROM egg_production
+                                WHERE owner_id=$1 AND farm_id=$2),0) AS produced,
+                      COALESCE((SELECT SUM(COALESCE(egg_quantity,0)) FROM invoice_items
+                                WHERE owner_id=$1 AND farm_id=$2),0) AS sold`;
+  const row = client
+    ? (await client.query(sql, [ownerId, farmId])).rows[0]
+    : (await query(sql, [ownerId, farmId]))[0];
   const produced = Number(row.produced);
   const sold = Number(row.sold);
   const rawAvailable = produced - sold;
@@ -79,9 +96,16 @@ const eggQuantityForItem = (item: any, invoiceType: string) =>
   invoiceType === 'egg_sale' && item.egg_quantity != null ? Number(item.egg_quantity) : null;
 
 export async function getOne(ownerId: string, id: string) {
-  const inv = await query('SELECT * FROM invoices WHERE id=$1 AND owner_id=$2', [id, ownerId]);
+  const farmId = getActiveFarmId(ownerId);
+  const inv = await query(
+    'SELECT * FROM invoices WHERE id=$1 AND owner_id=$2 AND farm_id=$3',
+    [id, ownerId, farmId],
+  );
   if (!inv.length) throw new HttpError(404, 'Invoice not found');
-  const items = await query('SELECT * FROM invoice_items WHERE invoice_id=$1 AND owner_id=$2 ORDER BY id', [id, ownerId]);
+  const items = await query(
+    'SELECT * FROM invoice_items WHERE invoice_id=$1 AND owner_id=$2 AND farm_id=$3 ORDER BY id',
+    [id, ownerId, farmId],
+  );
   for (const item of items) item.egg_quantity = eggQuantityForItem(item, inv[0].invoice_type);
   return { ...inv[0], items };
 }
@@ -160,7 +184,11 @@ export async function create(ownerId: string, d: any) {
       d.customer_name.trim(),
       phone,
     );
-    const seqRow = await c.query('SELECT COALESCE(MAX(invoice_seq),0)+1 AS n FROM invoices WHERE owner_id=$1 AND invoice_year=$2', [ownerId, year]);
+    const seqRow = await c.query(
+      `SELECT COALESCE(MAX(invoice_seq),0)+1 AS n FROM invoices
+       WHERE farm_id=$1 AND invoice_year=$2`,
+      [farmId, year],
+    );
     const seq = Number(seqRow.rows[0].n);
     const no = `INV-${year}-${String(seq).padStart(4, '0')}`;
     const ins = await c.query(
@@ -202,8 +230,9 @@ export async function updatePaymentStatus(
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
     const farmId = await resolveFarmId(client, ownerId);
     const invoices = await client.query(
-      'SELECT id,customer_id,grand_total,paid_amount FROM invoices WHERE id=$1 AND owner_id=$2 FOR UPDATE',
-      [id, ownerId],
+      `SELECT id,customer_id,grand_total,paid_amount FROM invoices
+       WHERE id=$1 AND owner_id=$2 AND farm_id=$3 FOR UPDATE`,
+      [id, ownerId, farmId],
     );
     if (!invoices.rows.length) throw new HttpError(404, 'Invoice not found');
     const invoice = invoices.rows[0];
@@ -220,22 +249,22 @@ export async function updatePaymentStatus(
       }
       const updated = await client.query(
         `UPDATE invoices SET payment_status='paid',paid_at=COALESCE(paid_at,NOW()),
-           paid_amount=grand_total WHERE id=$1 AND owner_id=$2
+           paid_amount=grand_total WHERE id=$1 AND owner_id=$2 AND farm_id=$3
          RETURNING id,payment_status,paid_at,paid_amount`,
-        [id, ownerId],
+        [id, ownerId, farmId],
       );
       return updated.rows[0];
     }
 
     await client.query(
-      'DELETE FROM customer_payments WHERE owner_id=$1 AND invoice_id=$2',
-      [ownerId, id],
+      'DELETE FROM customer_payments WHERE owner_id=$1 AND invoice_id=$2 AND farm_id=$3',
+      [ownerId, id, farmId],
     );
     const updated = await client.query(
       `UPDATE invoices SET payment_status='unpaid',paid_at=NULL,
-         paid_amount=0::numeric WHERE id=$1 AND owner_id=$2
+         paid_amount=0::numeric WHERE id=$1 AND owner_id=$2 AND farm_id=$3
        RETURNING id,payment_status,paid_at,paid_amount`,
-      [id, ownerId],
+      [id, ownerId, farmId],
     );
     return updated.rows[0];
   });
@@ -244,45 +273,53 @@ export async function updatePaymentStatus(
 export async function remove(ownerId: string, id: string) {
   await withTx(async (c) => {
     await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))', [ownerId]);
+    const farmId = await resolveFarmId(c, ownerId);
     const invoices = await c.query(
-      'SELECT customer_id,grand_total FROM invoices WHERE id=$1 AND owner_id=$2 FOR UPDATE',
-      [id, ownerId],
+      'SELECT customer_id,grand_total FROM invoices WHERE id=$1 AND owner_id=$2 AND farm_id=$3 FOR UPDATE',
+      [id, ownerId, farmId],
     );
     if (!invoices.rows.length) throw new HttpError(404, 'Invoice not found');
     const invoice = invoices.rows[0];
 
     await c.query(
-      'DELETE FROM customer_payments WHERE owner_id=$1 AND invoice_id=$2',
-      [ownerId, id],
+      'DELETE FROM customer_payments WHERE owner_id=$1 AND invoice_id=$2 AND farm_id=$3',
+      [ownerId, id, farmId],
     );
 
-    await c.query('DELETE FROM invoices WHERE id=$1 AND owner_id=$2', [id, ownerId]);
+    await c.query(
+      'DELETE FROM invoices WHERE id=$1 AND owner_id=$2 AND farm_id=$3',
+      [id, ownerId, farmId],
+    );
     if (invoice.customer_id) {
       await c.query(
         `DELETE FROM customer_payments p
          WHERE p.owner_id=$1 AND p.customer_id=$2 AND p.invoice_id IS NULL
+           AND p.farm_id=$3
            AND p.note='Opening balance: previously marked paid'
            AND NOT EXISTS (
              SELECT 1 FROM invoices i
              WHERE i.owner_id=p.owner_id AND i.customer_id=p.customer_id
+               AND i.farm_id=p.farm_id
            )`,
-        [ownerId, invoice.customer_id],
+        [ownerId, invoice.customer_id, farmId],
       );
     }
 
     if (invoice.customer_id) {
       await c.query(
         `DELETE FROM customers c
-         WHERE c.owner_id=$1 AND c.id=$2
+         WHERE c.owner_id=$1 AND c.id=$2 AND c.farm_id=$3
            AND NOT EXISTS (
              SELECT 1 FROM invoices i
              WHERE i.owner_id=c.owner_id AND i.customer_id=c.id
+               AND i.farm_id=c.farm_id
            )
            AND NOT EXISTS (
              SELECT 1 FROM customer_payments p
              WHERE p.owner_id=c.owner_id AND p.customer_id=c.id
+               AND p.farm_id=c.farm_id
            )`,
-        [ownerId, invoice.customer_id],
+        [ownerId, invoice.customer_id, farmId],
       );
     }
   });
@@ -295,8 +332,7 @@ export async function pdfFor(ownerId: string, id: string) {
             f.avatar_url AS logo_url,
             f.signature_url,f.payment_qr_url
      FROM farms f JOIN users u ON u.id=f.owner_user_id
-     WHERE f.owner_user_id=$1 AND (f.is_primary=TRUE OR f.id=$2)
-     ORDER BY f.is_primary DESC
+     WHERE f.owner_user_id=$1 AND f.id=$2
      LIMIT 1`,
     [ownerId, inv.farm_id],
   ))[0];

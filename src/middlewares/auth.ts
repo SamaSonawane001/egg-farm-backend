@@ -45,13 +45,19 @@ export function auth(req: Request, _res: Response, next: NextFunction) {
 
 export async function farmContext(req: Request, res: Response, next: NextFunction) {
   try {
-    const requested = req.header('X-Farm-Id')?.trim();
+    const headerFarmId = req.header('X-Farm-Id')?.trim();
+    const queryFarmId = req.query.farmId;
+    if (queryFarmId != null && typeof queryFarmId !== 'string') {
+      throw new HttpError(400, 'Invalid farm id');
+    }
+    const requested =
+      headerFarmId ||
+      (queryFarmId as string | undefined)?.trim() ||
+      undefined;
     await ensurePrimaryFarm(req.ownerId);
     const farms = await pool.query<{ id: string; is_primary: boolean }>(
       `SELECT f.id,f.is_primary FROM farms f
        WHERE f.owner_user_id=$1::uuid
-          OR to_jsonb(f)->>'user_id'=$1::text
-          OR to_jsonb(f)->>'owner_id'=$1::text
        ORDER BY f.is_primary DESC,f.created_at,f.id`,
       [req.ownerId],
     );
@@ -66,7 +72,8 @@ export async function farmContext(req: Request, res: Response, next: NextFunctio
       const selected = (requested ?? farms.rows[0].id).toLowerCase();
       if (!UUID.test(selected)) throw new HttpError(400, 'Invalid farm id');
       const ownedFarm = farms.rows.find((farm) => farm.id === selected);
-      farmId = ownedFarm?.id ?? farms.rows.find((farm) => farm.is_primary)?.id ?? farms.rows[0].id;
+      if (!ownedFarm) throw new HttpError(404, 'Farm not found for this account');
+      farmId = ownedFarm.id;
       farmIds = [farmId];
     }
 

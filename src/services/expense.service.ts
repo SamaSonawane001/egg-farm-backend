@@ -85,7 +85,8 @@ transactions AS (
          f.batch_name || ' (' || f.quantity::text || ' birds)',
          f.total_cost,NULL::text
   FROM flock_batches f,period d
-  WHERE f.owner_id=$1 AND f.arrival_date >= d.start_date AND f.arrival_date < d.end_date
+  WHERE f.owner_id=$1 AND ($6::boolean OR f.farm_id=$7::uuid)
+    AND f.arrival_date >= d.start_date AND f.arrival_date < d.end_date
   UNION ALL
   SELECT ('farm-expense-' || e.id::text),e.expense_date,
          CASE e.category
