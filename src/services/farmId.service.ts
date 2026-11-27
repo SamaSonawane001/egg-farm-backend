@@ -1,6 +1,7 @@
 import { PoolClient } from 'pg';
 import { getFarmContext } from '../config/farmContext';
 import { HttpError } from '../utils/httpError';
+import { ensurePrimaryFarm } from './primaryFarm.service';
 
 export async function resolveFarmId(
   client: PoolClient,
@@ -12,6 +13,7 @@ export async function resolveFarmId(
   }
   const activeFarmId =
     context?.farmId && context.farmId !== 'all' ? context.farmId : null;
+  await ensurePrimaryFarm(ownerId, client);
   const result = await client.query<{ id: string }>(
     `SELECT f.id FROM farms f
      WHERE (f.owner_user_id=$1::uuid
@@ -24,7 +26,16 @@ export async function resolveFarmId(
     [ownerId, activeFarmId],
   );
   if (!result.rows.length) {
-    throw new HttpError(404, 'Farm not found for this account');
+    const primary = await client.query<{ id: string }>(
+      `SELECT f.id FROM farms f
+       WHERE f.owner_user_id=$1::uuid AND f.is_primary=TRUE
+       ORDER BY f.created_at,f.id LIMIT 1`,
+      [ownerId],
+    );
+    if (!primary.rows.length) {
+      throw new HttpError(404, 'Farm not found for this account');
+    }
+    return primary.rows[0].id;
   }
   return result.rows[0].id;
 }

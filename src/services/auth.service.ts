@@ -6,6 +6,7 @@ import { query, setFarmSettings, withTx } from '../config/db';
 import { env } from '../config/env';
 import { HttpError } from '../utils/httpError';
 import { User } from '../models/types';
+import { ensurePrimaryFarm } from './primaryFarm.service';
 
 const INDIAN_MOBILE = /^[6-9]\d{9}$/;
 export const CONSENT_VERSION = 'v1.0-2027';
@@ -201,12 +202,36 @@ export async function register(i: {
       [i.mobile, hash, i.owner_name, i.farm_name, i.avatar_url, i.consent_version],
     );
     const ownerId = user.rows[0].id;
-    const farm = await client.query<{ id: string }>(
-      `INSERT INTO farms (owner_user_id,name,is_primary,avatar_url)
-       VALUES ($1,$2,TRUE,$3) RETURNING id`,
-      [ownerId, i.farm_name, i.avatar_url],
+    const existingPrimary = await client.query<{ id: string }>(
+      `SELECT id FROM farms
+       WHERE owner_user_id=$1::uuid AND is_primary=TRUE
+       ORDER BY created_at,id LIMIT 1`,
+      [ownerId],
     );
-    const farmId = farm.rows[0].id;
+    let farmId: string;
+    if (existingPrimary.rows.length) {
+      farmId = existingPrimary.rows[0].id;
+    } else {
+      const farm = await client.query<{ id: string }>(
+        `INSERT INTO farms (owner_user_id,name,is_primary,avatar_url)
+         VALUES ($1,$2,TRUE,$3)
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+        [ownerId, i.farm_name, i.avatar_url],
+      );
+      if (!farm.rows.length) {
+        const fallback = await client.query<{ id: string }>(
+          `SELECT id FROM farms
+           WHERE owner_user_id=$1::uuid
+           ORDER BY is_primary DESC,created_at,id LIMIT 1`,
+          [ownerId],
+        );
+        if (!fallback.rows.length) throw new HttpError(500, 'Could not create primary farm');
+        farmId = fallback.rows[0].id;
+      } else {
+        farmId = farm.rows[0].id;
+      }
+    }
     await setFarmSettings(client, { ownerId, farmId, farmIds: [farmId] });
     await client.query(
       'INSERT INTO feed_products(owner_id,farm_id,name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',
@@ -302,6 +327,7 @@ export async function login(mobile: string, password: string) {
 export async function getUser(ownerId: string, farmId?: string): Promise<User> {
   const selectedFarmId =
     farmId?.toLowerCase() === 'all' ? null : farmId ?? null;
+  await ensurePrimaryFarm(ownerId);
   const [accounts, farms] = await Promise.all([
     query<Pick<User, 'id' | 'mobile' | 'owner_name' | 'shared_inventory_enabled'>>(
       `SELECT id,mobile,owner_name,shared_inventory_enabled
@@ -328,18 +354,27 @@ export async function getUser(ownerId: string, farmId?: string): Promise<User> {
               f.signature_url,f.payment_qr_url,f.address,f.low_stock_threshold,
               f.kg_per_bag,f.default_tax_percent,f.eggs_per_tray
        FROM farms f
-       WHERE ($1::uuid IS NULL OR f.id=$1::uuid)
-         AND (f.owner_user_id=$2::uuid
+       WHERE (f.owner_user_id=$2::uuid
            OR to_jsonb(f)->>'user_id'=$2::text
            OR to_jsonb(f)->>'owner_id'=$2::text)
-       ORDER BY f.is_primary DESC,f.created_at,f.id LIMIT 1`,
+        ORDER BY f.is_primary DESC,f.created_at,f.id`,
       [selectedFarmId, ownerId],
     ),
   ]);
-  if (!accounts.length || !farms.length) {
+  if (!accounts.length) {
+    throw new HttpError(404, 'Account not found');
+  }
+  if (!farms.length) {
+    await ensurePrimaryFarm(ownerId);
     throw new HttpError(404, 'Account or farm not found');
   }
-  return { ...accounts[0], ...farms[0] };
+  const selectedFarm =
+    (selectedFarmId
+      ? farms.find((farm) => farm.farm_id === selectedFarmId)
+      : undefined) ??
+    farms.find((farm) => farm.is_primary) ??
+    farms[0];
+  return { ...accounts[0], ...selectedFarm };
 }
 
 async function consolidateSharedInventory(

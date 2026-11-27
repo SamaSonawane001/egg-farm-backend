@@ -1,7 +1,9 @@
 import { query, setFarmSettings, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
+import { ensurePrimaryFarm } from './primaryFarm.service';
 
 export async function listFarms(ownerId: string) {
+  await ensurePrimaryFarm(ownerId);
   return query<{
     farm_id: string;
     farm_name: string;
@@ -33,6 +35,7 @@ export async function createFarm(
   copyBranding: boolean,
 ) {
   const farmId = await withTx(async (client) => {
+    await ensurePrimaryFarm(ownerId, client);
     const source = await client.query(
       `SELECT avatar_url,signature_url,payment_qr_url,address,low_stock_threshold,
               kg_per_bag,default_tax_percent,eggs_per_tray

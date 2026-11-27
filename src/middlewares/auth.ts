@@ -4,6 +4,7 @@ import { env } from '../config/env';
 import { HttpError } from '../utils/httpError';
 import { pool } from '../config/db';
 import { runWithFarmContext } from '../config/farmContext';
+import { ensurePrimaryFarm } from '../services/primaryFarm.service';
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -45,8 +46,9 @@ export function auth(req: Request, _res: Response, next: NextFunction) {
 export async function farmContext(req: Request, res: Response, next: NextFunction) {
   try {
     const requested = req.header('X-Farm-Id')?.trim();
-    const farms = await pool.query<{ id: string }>(
-      `SELECT f.id FROM farms f
+    await ensurePrimaryFarm(req.ownerId);
+    const farms = await pool.query<{ id: string; is_primary: boolean }>(
+      `SELECT f.id,f.is_primary FROM farms f
        WHERE f.owner_user_id=$1::uuid
           OR to_jsonb(f)->>'user_id'=$1::text
           OR to_jsonb(f)->>'owner_id'=$1::text
@@ -63,18 +65,8 @@ export async function farmContext(req: Request, res: Response, next: NextFunctio
     } else {
       const selected = (requested ?? farms.rows[0].id).toLowerCase();
       if (!UUID.test(selected)) throw new HttpError(400, 'Invalid farm id');
-      const ownedFarm = await pool.query<{ id: string }>(
-        `SELECT f.id FROM farms f
-         WHERE f.id=$1::uuid
-           AND (f.owner_user_id=$2::uuid
-             OR to_jsonb(f)->>'user_id'=$2::text
-             OR to_jsonb(f)->>'owner_id'=$2::text)`,
-        [selected, req.ownerId],
-      );
-      if (!ownedFarm.rows.length) {
-        throw new HttpError(404, 'Farm not found for this account');
-      }
-      farmId = ownedFarm.rows[0].id;
+      const ownedFarm = farms.rows.find((farm) => farm.id === selected);
+      farmId = ownedFarm?.id ?? farms.rows.find((farm) => farm.is_primary)?.id ?? farms.rows[0].id;
       farmIds = [farmId];
     }
 
