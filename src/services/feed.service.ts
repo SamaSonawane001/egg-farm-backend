@@ -5,10 +5,17 @@ import { HttpError } from '../utils/httpError';
 import { ensureBatch } from './flock.service';
 import { resolveFarmId } from './farmId.service';
 
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export async function getStock(ownerId: string) {
   const farmContext = getFarmContext();
-  const activeFarmId = farmContext?.farmId ?? null;
-  const farmIds = farmContext?.farmIds ?? null;
+  const contextFarmId = farmContext?.farmId;
+  const activeFarmId =
+    contextFarmId && UUID.test(contextFarmId) ? contextFarmId : null;
+  const contextFarmIds = farmContext?.farmIds;
+  const validFarmIds = contextFarmIds?.filter((farmId) => UUID.test(farmId));
+  const farmIds = validFarmIds?.length ? validFarmIds : null;
   if (activeFarmId != null) await seedReadyFeedForEmptyFarm(ownerId);
   const [totals, feeds, settings] = await Promise.all([
     query(
@@ -87,7 +94,9 @@ export const listPurchases = async (ownerId: string, limit = 20, offset = 0) => 
 };
 
 export const listProducts = async (ownerId: string) => {
-  const activeFarmId = getFarmContext()?.farmId ?? null;
+  const contextFarmId = getFarmContext()?.farmId;
+  const activeFarmId =
+    contextFarmId && UUID.test(contextFarmId) ? contextFarmId : null;
   if (activeFarmId != null) await seedReadyFeedForEmptyFarm(ownerId);
   const productScope = activeFarmId == null ? 'fp.owner_id=$1' : 'fp.farm_id=$1';
   const rows = await query(

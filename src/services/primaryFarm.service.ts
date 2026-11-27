@@ -16,10 +16,8 @@ export async function ensurePrimaryFarm(
     `SELECT id,name,is_primary
      FROM farms
      WHERE owner_user_id=$1::uuid
-        OR to_jsonb(farms)->>'user_id'=$1::text
-        OR to_jsonb(farms)->>'owner_id'=$1::text
      ORDER BY is_primary DESC,created_at ASC,id ASC
-     LIMIT 2`,
+     LIMIT 1`,
     [ownerId],
   );
   if (farms.rows.length) {
@@ -31,24 +29,22 @@ export async function ensurePrimaryFarm(
     [ownerId],
   );
   const name = account.rows[0]?.farm_name?.trim() || 'Main Farm';
-  try {
-    const created = await run.query<FarmRow>(
-      `INSERT INTO farms (owner_user_id,name,is_primary)
-       VALUES ($1,$2,TRUE)
-       RETURNING id,name,is_primary`,
-      [ownerId, name],
-    );
-    if (created.rows.length) return created.rows[0];
-  } catch {
-    // A concurrent request may have created the primary farm first.
-  }
+  const created = await run.query<FarmRow>(
+    `INSERT INTO farms (
+       owner_user_id,name,is_primary,address,low_stock_threshold,kg_per_bag,
+       default_tax_percent,eggs_per_tray
+     )
+     VALUES ($1,$2,TRUE,NULL,10,50,0,30)
+     ON CONFLICT DO NOTHING
+     RETURNING id,name,is_primary`,
+    [ownerId, name],
+  );
+  if (created.rows.length) return created.rows[0];
 
   const fallback = await run.query<FarmRow>(
     `SELECT id,name,is_primary
      FROM farms
      WHERE owner_user_id=$1::uuid
-        OR to_jsonb(farms)->>'user_id'=$1::text
-        OR to_jsonb(farms)->>'owner_id'=$1::text
      ORDER BY is_primary DESC,created_at ASC,id ASC
      LIMIT 1`,
     [ownerId],
