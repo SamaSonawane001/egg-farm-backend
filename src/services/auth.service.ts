@@ -357,7 +357,8 @@ export async function getUser(ownerId: string, farmId?: string): Promise<User> {
        WHERE (f.owner_user_id=$2::uuid
            OR to_jsonb(f)->>'user_id'=$2::text
            OR to_jsonb(f)->>'owner_id'=$2::text)
-        ORDER BY f.is_primary DESC,f.created_at,f.id`,
+        ORDER BY COALESCE(f.id=$1::uuid,FALSE) DESC,
+                 f.is_primary DESC,f.created_at,f.id`,
       [selectedFarmId, ownerId],
     ),
   ]);
