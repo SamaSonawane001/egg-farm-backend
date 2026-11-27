@@ -40,4 +40,7 @@ export const env = {
   razorpayKeyId: process.env.RAZORPAY_KEY_ID?.trim() || '',
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET?.trim() || '',
   razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || '',
+  razorpayPlanAmountPaise: Number(
+    process.env.RAZORPAY_PLAN_AMOUNT_PAISE || 159900,
+  ),
 };

@@ -5,11 +5,31 @@ import { env } from '../config/env';
 import { pool, query, withTx } from '../config/db';
 import { HttpError } from '../utils/httpError';
 
-const PLAN_AMOUNT_PAISE = 89900;
+const PLAN_AMOUNT_PAISE = env.razorpayPlanAmountPaise;
 const PLAN_CURRENCY = 'INR';
 const PLAN_DAYS = 365;
 
-type PaymentEvent = Record<string, unknown>;
+type PaymentEvent = {
+  payload?: {
+    payment?: {
+      entity?: {
+        created_at?: unknown;
+      };
+    };
+  };
+  payment?: {
+    created_at?: unknown;
+  };
+  [key: string]: unknown;
+};
+
+function paymentTimestamp(event: PaymentEvent): Date {
+  const payment = event.payload?.payment?.entity ?? event.payment;
+  const createdAt = Number(payment?.created_at);
+  return Number.isFinite(createdAt) && createdAt > 0
+    ? new Date(createdAt * 1000)
+    : new Date();
+}
 
 function razorpay() {
   if (!env.razorpayKeyId || !env.razorpayKeySecret) {
@@ -92,6 +112,7 @@ async function activateCapturedPayment(
   signature?: string,
 ) {
   const ownerId = await findPaymentOwner(orderId);
+  const paidAt = paymentTimestamp(event);
   return withTx(async (client) => {
     await lockOwner(client, ownerId);
     const rows = await client.query(
@@ -125,12 +146,12 @@ async function activateCapturedPayment(
       await client.query(
         `UPDATE users SET subscription_status='ACTIVE',
            subscription_plan='ANNUAL_PRO',
-           subscription_starts_at=NOW(),
-           subscription_expires_at=NOW() + INTERVAL '365 days',
+           subscription_starts_at=$3,
+           subscription_expires_at=$3::timestamptz + INTERVAL '365 days',
            subscription_cancelled_at=NULL,
            subscription_payment_id=$2
          WHERE id=$1`,
-        [ownerId, payment.id],
+        [ownerId, payment.id, paidAt],
       );
     }
     return { status: 'ACTIVE' };
